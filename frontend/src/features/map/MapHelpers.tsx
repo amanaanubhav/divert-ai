@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Marker, TileLayer, Tooltip, useMap } from 'react-leaflet'
-import type { BBox, Incident } from '../../api/types'
+import type { BBox, Incident, IncidentStatus } from '../../api/types'
 import { config } from '../../config'
 import { STATUS_LABEL, TYPE_LABEL } from '../../lib/format'
 import { useUiStore } from '../../store/ui'
@@ -92,6 +92,9 @@ export function FocusController() {
   return null
 }
 
+/** A unit has reached the scene (and maybe left it with the patient): the pin is faded. */
+const SCENE_REACHED: readonly IncidentStatus[] = ['ON_SCENE', 'TRANSPORTING', 'AT_HOSPITAL']
+
 /** Active incidents as type-coloured pins. */
 export function IncidentsLayer({ incidents }: { incidents: readonly Incident[] }) {
   return (
@@ -100,7 +103,7 @@ export function IncidentsLayer({ incidents }: { incidents: readonly Incident[] }
         <Marker
           key={inc.id}
           position={inc.location as [number, number]}
-          icon={incidentIcon(inc.type, inc.status === 'ON_SCENE')}
+          icon={incidentIcon(inc.type, SCENE_REACHED.includes(inc.status))}
           keyboard={false}
           zIndexOffset={200}
         >
