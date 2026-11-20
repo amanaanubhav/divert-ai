@@ -11,6 +11,14 @@ export interface LayerToggles {
   routes: boolean
 }
 
+/** A route alternative drawn faintly on a map while "Why this route" is hovered. */
+export interface RoutePreview {
+  label: string
+  route: LatLng[]
+  /** The candidate under the pointer: drawn a little stronger. */
+  emphasis: boolean
+}
+
 export interface UiState {
   tab: Tab
   city: string
@@ -22,6 +30,8 @@ export interface UiState {
   darkTiles: boolean
   /** Request to pan the live map (nonce makes repeated requests distinct). */
   focus: { pos: LatLng; zoom?: number; nonce: number } | null
+  /** Alternatives of the selected vehicle's route, previewed on the live map. */
+  routePreview: RoutePreview[] | null
   setTab: (tab: Tab) => void
   setCity: (city: string) => void
   setDispatchType: (t: IncidentType) => void
@@ -30,6 +40,7 @@ export interface UiState {
   toggleLayer: (layer: keyof LayerToggles) => void
   setDarkTiles: (dark: boolean) => void
   focusOn: (pos: LatLng, zoom?: number) => void
+  setRoutePreview: (routes: RoutePreview[] | null) => void
 }
 
 const DARK_KEY = 'divert.darkTiles'
@@ -69,11 +80,12 @@ export const useUiStore = create<UiState>()((set) => ({
   layers: { signals: true, stations: true, routes: true },
   darkTiles: readDark(),
   focus: null,
-  setTab: (tab) => set({ tab }),
-  setCity: (city) => set({ city, pending: null, selectedVehicle: null }),
+  routePreview: null,
+  setTab: (tab) => set({ tab, routePreview: null }),
+  setCity: (city) => set({ city, pending: null, selectedVehicle: null, routePreview: null }),
   setDispatchType: (dispatchType) => set({ dispatchType }),
   setPending: (pending) => set({ pending }),
-  selectVehicle: (selectedVehicle) => set({ selectedVehicle }),
+  selectVehicle: (selectedVehicle) => set({ selectedVehicle, routePreview: null }),
   toggleLayer: (layer) => set((s) => ({ layers: { ...s.layers, [layer]: !s.layers[layer] } })),
   setDarkTiles: (darkTiles) => {
     try {
@@ -87,4 +99,5 @@ export const useUiStore = create<UiState>()((set) => ({
     set((s) => ({
       focus: { pos, ...(zoom !== undefined ? { zoom } : {}), nonce: (s.focus?.nonce ?? 0) + 1 },
     })),
+  setRoutePreview: (routePreview) => set({ routePreview }),
 }))
