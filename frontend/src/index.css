@@ -2,51 +2,110 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Theme: colours are CSS variables generated from src/lib/palette.ts by tailwind.config.ts
+ * (light by default, dark under prefers-color-scheme). Use the Tailwind tokens (bg-surface,
+ * text-muted, border-line, bg-primary, ...) or rgb(var(--c-…)) here; never raw hex in components.
+ * Layers: src/lib/zIndex.ts.
+ */
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
   html,
   body,
   #root {
     height: 100%;
   }
   body {
-    @apply bg-ink-950 font-sans text-slate-200 antialiased;
+    @apply bg-page font-sans text-fg antialiased;
+    font-size: 14px;
+    line-height: 1.45;
   }
   ::selection {
-    @apply bg-rose-500/40;
+    background: rgb(var(--c-primary) / 0.2);
+  }
+  /* One visible keyboard focus style for every control. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-accent));
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .focus-inset:focus-visible {
+    outline-offset: -2px;
   }
 }
 
 /* ------------------------------------------------------------------ leaflet chrome */
 .leaflet-container {
-  @apply bg-ink-800 font-sans;
+  /* Own stacking context: Leaflet's pane/control z-indexes (200-1000) stay inside the map. */
+  isolation: isolate;
+  z-index: 0;
+  font-family: inherit;
+  background: rgb(var(--c-subtle));
+}
+.leaflet-container a {
+  color: rgb(var(--c-accent));
 }
 .leaflet-container.dispatch-armed {
   cursor: crosshair;
 }
 .leaflet-tooltip.divert-tip {
-  @apply rounded-md border-0 bg-ink-900/95 px-2 py-1 text-xs text-slate-100 shadow-lg;
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 4px;
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-fg));
+  padding: 2px 6px;
+  font-size: 12px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
 }
 .leaflet-tooltip.divert-tip::before {
   display: none;
 }
-/* Basemap treatments (see BaseTiles): muted light; dark derived from the light tiles. */
-.leaflet-layer.tiles-muted {
-  filter: saturate(0.55) contrast(0.92) brightness(1.03);
+.divert-tip .tip-meta {
+  color: rgb(var(--c-muted));
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
 }
+.divert-tip .tip-ok {
+  color: rgb(var(--c-ok));
+}
+.divert-tip .tip-bad {
+  color: rgb(var(--c-bad));
+}
+/* Light: standard OSM tiles, unfiltered. Dark basemap: derived from the light tiles. */
 .leaflet-layer.tiles-dark {
   filter: invert(1) hue-rotate(180deg) saturate(0.35) brightness(0.82) contrast(0.92);
 }
-.leaflet-control-attribution {
-  @apply text-[10px];
+.leaflet-control-attribution.leaflet-control {
+  font-size: 11px;
+  background: rgb(var(--c-surface) / 0.85);
+  color: rgb(var(--c-muted));
 }
-.leaflet-bar a {
-  @apply border-ink-700 bg-ink-900 text-slate-200;
+.leaflet-bar,
+.leaflet-touch .leaflet-bar {
+  border: 1px solid rgb(var(--c-field));
+  border-radius: 4px;
+  box-shadow: none;
+  background-clip: border-box;
 }
-.leaflet-bar a:hover {
-  @apply bg-ink-700 text-white;
+.leaflet-bar a,
+.leaflet-touch .leaflet-bar a {
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-fg));
+  border-bottom-color: rgb(var(--c-line));
+}
+.leaflet-bar a:hover,
+.leaflet-bar a:focus-visible {
+  background: rgb(var(--c-subtle));
+  color: rgb(var(--c-fg));
+}
+.leaflet-bar a:first-child {
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+.leaflet-bar a:last-child {
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
 }
 
 /* ------------------------------------------------------------------ vehicles */
@@ -79,31 +138,31 @@
   font-size: 11px;
   line-height: 1;
   border: 2px solid #fff;
-  box-shadow: 0 1px 6px rgb(0 0 0 / 0.45);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
 }
 .veh.is-selected .veh-chip {
-  box-shadow:
-    0 0 0 3px rgb(244 63 94 / 0.85),
-    0 1px 8px rgb(0 0 0 / 0.5);
+  outline: 3px solid rgb(var(--c-accent));
+  outline-offset: 1px;
 }
 .veh.on-scene .veh-chip {
-  background: #0f172a;
+  background: #fff;
   color: var(--c);
   border-color: var(--c);
 }
 .veh-label {
   position: absolute;
   left: 50%;
-  top: 30px;
+  top: 31px;
   transform: translateX(-50%);
   white-space: nowrap;
+  border: 1px solid rgb(var(--c-line));
   border-radius: 4px;
-  background: rgb(11 15 23 / 0.88);
-  color: #f1f5f9;
-  padding: 1px 5px;
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-fg));
+  padding: 0 5px;
   font:
-    600 10px/1.4 ui-monospace,
-    SFMono-Regular,
+    600 11px/1.5 ui-monospace,
+    'Cascadia Mono',
     Consolas,
     monospace;
   pointer-events: none;
@@ -114,25 +173,33 @@
   position: relative;
   width: 24px;
   height: 24px;
-  --sc: #16a34a;
+  --sc: var(--map-preempted);
 }
 .sig.is-conflict {
-  --sc: #f59e0b;
-}
-.sig-ring {
-  position: absolute;
-  inset: 4px;
-  border-radius: 9999px;
-  border: 2px solid var(--sc);
-  @apply animate-pulse-ring;
+  --sc: var(--map-conflict);
 }
 .sig-dot {
   position: absolute;
-  inset: 7px;
+  inset: 6px;
   border-radius: 9999px;
   background: var(--sc);
   border: 2px solid #fff;
-  box-shadow: 0 0 10px var(--sc);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+}
+/* Pre-empted: a plain on/off blink (carries "signal held green now"). */
+.sig:not(.is-conflict) .sig-dot {
+  animation: sig-blink 1.2s steps(1, end) infinite;
+}
+@keyframes sig-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+/* Conflict: a diamond, so the state does not rely on colour alone. */
+.sig.is-conflict .sig-dot {
+  border-radius: 2px;
+  transform: rotate(45deg);
+  inset: 7px;
 }
 .sig-approach {
   position: absolute;
@@ -144,32 +211,31 @@
 .sig-approach > i {
   position: absolute;
   left: -5px;
-  top: 13px;
+  top: 12px;
   width: 0;
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
   border-bottom: 9px solid var(--sc);
-  filter: drop-shadow(0 0 1px #fff);
 }
 .sig-label {
   position: absolute;
-  left: 26px;
-  top: 2px;
+  left: 25px;
+  top: 3px;
   white-space: nowrap;
   border-radius: 4px;
   background: var(--sc);
-  color: #04130a;
-  padding: 1px 5px;
+  color: #fff;
+  padding: 0 5px;
   font:
-    700 10px/1.5 ui-monospace,
-    SFMono-Regular,
-    Consolas,
-    monospace;
-  box-shadow: 0 1px 4px rgb(0 0 0 / 0.4);
+    600 11px/1.6 'Noto Sans',
+    'Segoe UI',
+    Arial,
+    sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 .sig.is-conflict .sig-label {
-  color: #1c1203;
+  color: #1f2328;
 }
 
 /* ------------------------------------------------------------------ incidents + pending */
@@ -188,7 +254,7 @@
   transform: rotate(-45deg);
   background: var(--c);
   border: 2px solid #fff;
-  box-shadow: 0 2px 6px rgb(0 0 0 / 0.45);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
 }
 .pin-glyph {
   position: absolute;
@@ -201,22 +267,11 @@
   line-height: 16px;
 }
 .pin.is-pending .pin-head {
-  background: #f43f5e;
-  animation: pin-bob 1.1s ease-in-out infinite;
-}
-@keyframes pin-bob {
-  0%,
-  100% {
-    transform: rotate(-45deg) translate(0, 0);
-  }
-  50% {
-    transform: rotate(-45deg) translate(2px, -2px);
-  }
+  background: var(--map-pending);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sig-ring,
-  .pin.is-pending .pin-head {
-    animation: none;
+  .sig-dot {
+    animation: none !important;
   }
 }

@@ -59,18 +59,18 @@ export function IncidentsPanel({
       ) : incidents.length === 0 ? (
         <EmptyState>No incidents reported yet.</EmptyState>
       ) : (
-        <ul className="divide-y divide-white/[0.05]">
+        <ul className="divide-y divide-line">
           {incidents.map((inc) => {
             const active = isActive(inc.status)
             const vid = vehicleFor(inc.id)
             return (
               <li
                 key={inc.id}
-                className={clsx('flex items-start gap-2 px-3 py-2', !active && 'opacity-60')}
+                className={clsx('flex items-start gap-2 px-3 py-2', !active && 'bg-subtle/50')}
               >
                 <button
                   type="button"
-                  className="min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                  className="min-w-0 flex-1 rounded text-left"
                   onClick={() => {
                     focusOn(inc.location)
                     if (vid) selectVehicle(vid)
@@ -81,12 +81,14 @@ export function IncidentsPanel({
                     <TypeBadge type={inc.type} />
                     <StatusBadge status={inc.status} />
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
-                    <span className="font-mono">{formatClock(inc.reported_at, city.timezone)}</span>
-                    {vid ? <span className="truncate font-mono text-slate-400">{vid}</span> : null}
+                  <div className="mt-1 flex items-center gap-2 text-xs text-muted">
+                    <span className="tabular-nums">
+                      {formatClock(inc.reported_at, city.timezone)}
+                    </span>
+                    {vid ? <span className="truncate font-mono">{vid}</span> : null}
                   </div>
                   {inc.description ? (
-                    <div className="mt-0.5 truncate text-xs text-slate-400">{inc.description}</div>
+                    <div className="mt-0.5 truncate text-xs text-muted">{inc.description}</div>
                   ) : null}
                 </button>
                 {active ? (
@@ -102,7 +104,7 @@ export function IncidentsPanel({
                   ) : (
                     <Button
                       size="sm"
-                      variant="ghost"
+                      variant="secondary"
                       onClick={() => setConfirming(inc.id)}
                       disabled={cancel.isPending && cancel.variables === inc.id}
                       aria-label={`Cancel ${inc.type.toLowerCase()} incident`}

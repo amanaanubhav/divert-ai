@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { useMap } from 'react-leaflet'
 import type { Signal, Station } from '../../api/types'
 import { SERVICE_LABEL } from '../../lib/format'
-import { SERVICE_COLOR, SIGNAL_COLOR } from '../../lib/theme'
+import { MAP_COLOR, SERVICE_COLOR, SIGNAL_COLOR } from '../../lib/theme'
 import { escapeHtml } from './icons'
 
 /** Marker radius by zoom: subdued when zoomed out, easy to hit when zoomed in. */
@@ -47,7 +47,7 @@ export function SignalsLayer({ signals }: { signals: readonly Signal[] }) {
       markers.push(m)
       m.bindTooltip(
         () =>
-          `<strong>${escapeHtml(s.name ?? 'Signalised junction')}</strong><br><span class="font-mono text-[10px] text-slate-400">${escapeHtml(s.id)} · ${s.osm_node_ids.length} OSM node${s.osm_node_ids.length === 1 ? '' : 's'}</span>`,
+          `<strong>${escapeHtml(s.name ?? 'Signalised junction')}</strong><br><span class="tip-meta">${escapeHtml(s.id)} · ${s.osm_node_ids.length} OSM node${s.osm_node_ids.length === 1 ? '' : 's'}</span>`,
         { className: 'divert-tip', direction: 'top', offset: [0, -3] },
       ).addTo(group)
     }
@@ -81,7 +81,7 @@ export function StationsLayer({ stations }: { stations: readonly Station[] }) {
       markers.push(m)
       m.bindTooltip(
         () =>
-          `<strong>${escapeHtml(st.name ?? 'Unnamed station')}</strong><br>${SERVICE_LABEL[st.service]} · <span class="${st.free_units > 0 ? 'text-emerald-300' : 'text-red-300'}">${st.free_units}/${st.total_units} free</span>`,
+          `<strong>${escapeHtml(st.name ?? 'Unnamed station')}</strong><br>${SERVICE_LABEL[st.service]} · <span class="${st.free_units > 0 ? 'tip-ok' : 'tip-bad'}">${st.free_units}/${st.total_units} free</span>`,
         { className: 'divert-tip', direction: 'top', offset: [0, -4] },
       ).addTo(group)
     }
@@ -105,7 +105,7 @@ export function CityBoundsLayer({ bbox }: { bbox: readonly [number, number, numb
         [s, w],
         [n, e],
       ],
-      { color: '#f43f5e', weight: 1.2, dashArray: '6 6', fill: false, interactive: false },
+      { color: MAP_COLOR.bounds, weight: 1.5, dashArray: '6 6', fill: false, interactive: false },
     ).addTo(map)
     return () => {
       rect.remove()

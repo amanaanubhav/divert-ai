@@ -96,9 +96,9 @@ export function DispatchPanel({ city }: { city: CityDetail }) {
       </div>
 
       {!pending ? (
-        <p className="rounded-md border border-dashed border-white/10 px-3 py-3 text-sm text-slate-400">
-          Click the map inside the dashed <span className="text-rose-300">{city.name}</span> service
-          area to place a {TYPE_LABEL[type].toLowerCase()} incident.
+        <p className="rounded border border-dashed border-field px-3 py-2.5 text-sm text-muted">
+          Click the map inside the dashed <span className="font-medium text-fg">{city.name}</span>{' '}
+          service area to place a {TYPE_LABEL[type].toLowerCase()} incident.
         </p>
       ) : (
         <form
@@ -109,34 +109,34 @@ export function DispatchPanel({ city }: { city: CityDetail }) {
           }}
         >
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-sm">
-            <dt className="text-slate-500">Location</dt>
-            <dd className="font-mono text-xs text-slate-200">{formatLatLng(pending)}</dd>
-            <dt className="text-slate-500">Nearest</dt>
-            <dd className="min-w-0 text-slate-200">
+            <dt className="text-muted">Location</dt>
+            <dd className="tabular-nums text-fg">{formatLatLng(pending)}</dd>
+            <dt className="text-muted">Nearest</dt>
+            <dd className="min-w-0 text-fg">
               {near ? (
                 <>
                   <span className="block truncate">{near.station.name ?? near.station.id}</span>
-                  <span className="text-xs text-slate-400">
+                  <span className="text-xs text-muted">
                     {formatDistance(near.distance_m)} straight-line ·{' '}
                     {near.hasFreeUnit ? (
-                      <span className="text-emerald-300">{near.station.free_units} free</span>
+                      <span className="text-ok">{near.station.free_units} free</span>
                     ) : (
-                      <span className="text-amber-300">
+                      <span className="text-warn">
                         no free {SERVICE_LABEL[SERVICE_FOR_TYPE[type]].toLowerCase()} units
                       </span>
                     )}
                   </span>
                 </>
               ) : (
-                <span className="text-amber-300">
+                <span className="text-warn">
                   No {SERVICE_LABEL[SERVICE_FOR_TYPE[type]].toLowerCase()} station
                 </span>
               )}
             </dd>
           </dl>
           <div>
-            <label htmlFor={descId} className="mb-1 block text-xs font-medium text-slate-400">
-              Notes <span className="text-slate-600">(optional)</span>
+            <label htmlFor={descId} className="mb-1 block text-sm font-medium text-fg">
+              Notes <span className="font-normal text-muted">(optional)</span>
             </label>
             <textarea
               id={descId}
@@ -144,7 +144,7 @@ export function DispatchPanel({ city }: { city: CityDetail }) {
               maxLength={1000}
               rows={2}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full resize-none rounded-md border-0 bg-ink-800 px-2.5 py-1.5 text-sm text-slate-100 ring-1 ring-inset ring-white/10 placeholder:text-slate-600 focus:ring-2 focus:ring-sky-400"
+              className="w-full resize-none rounded border border-field bg-surface px-2.5 py-1.5 text-sm text-fg placeholder:text-muted"
               placeholder="e.g. 2 injured, left lane blocked"
             />
           </div>
@@ -158,7 +158,7 @@ export function DispatchPanel({ city }: { city: CityDetail }) {
               Clear
             </Button>
           </div>
-          <p className="text-[11px] leading-snug text-slate-500">
+          <p className="text-xs text-muted">
             The server picks the unit by routed ETA (OSRM + city congestion), not straight-line
             distance.
           </p>

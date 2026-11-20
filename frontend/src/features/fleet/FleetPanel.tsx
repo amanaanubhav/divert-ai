@@ -44,7 +44,7 @@ export function FleetPanel({ city }: { city: CityDetail }) {
       {list.length === 0 ? (
         <EmptyState>No vehicles on the road. Dispatch one from the panel on the left.</EmptyState>
       ) : (
-        <ul className="divide-y divide-white/[0.05]">
+        <ul className="divide-y divide-line">
           {list.map((v) => (
             <FleetRow
               key={v.id}
@@ -109,43 +109,40 @@ function FleetRow({
         onClick={onSelect}
         aria-pressed={selected}
         className={clsx(
-          'w-full px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400',
-          selected ? 'bg-rose-500/10' : 'hover:bg-white/[0.03]',
+          'focus-inset w-full border-l-[3px] px-3 py-2.5 text-left',
+          selected ? 'border-l-accent bg-primary-subtle' : 'border-l-transparent hover:bg-subtle',
         )}
       >
         <div className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-2">
             <ServiceDot service={v.service} />
-            <span className="truncate font-mono text-xs font-semibold text-slate-100">{v.id}</span>
+            <span className="truncate font-mono text-sm font-semibold text-fg">{v.id}</span>
           </span>
           {v.status === 'ON_SCENE' ? (
-            <span className="text-xs font-medium text-amber-300">On scene</span>
+            <span className="text-xs font-medium text-warn">On scene</span>
           ) : (
             <span
-              className="font-mono text-sm font-semibold tabular-nums text-rose-200"
+              className="text-sm font-semibold tabular-nums text-fg"
               aria-label={`ETA ${formatDuration(v.eta_s)}`}
             >
               {formatDuration(v.eta_s)}
             </span>
           )}
         </div>
-        <div className="mt-0.5 truncate text-xs text-slate-500">
+        <div className="mt-0.5 truncate text-xs text-muted">
           {stationLabel(station, v.station_id)}
         </div>
         <div
-          className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink-700"
+          className="mt-1.5 h-1.5 overflow-hidden rounded-sm bg-subtle"
           role="progressbar"
           aria-label="Route progress"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.round(progress * 100)}
         >
-          <div
-            className="h-full rounded-full bg-rose-500"
-            style={{ width: `${progress * 100}%` }}
-          />
+          <div className="h-full bg-accent" style={{ width: `${progress * 100}%` }} />
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-400">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
           <span>{formatSpeed(v.speed_mps)}</span>
           <span>{formatDistance(Math.max(0, v.distance_m - v.along_m))} left</span>
           {next ? (
@@ -154,15 +151,15 @@ function FleetRow({
                 aria-hidden="true"
                 className={clsx(
                   'h-1.5 w-1.5 rounded-full',
-                  claimState === 'PREEMPTED' && 'bg-emerald-400',
-                  claimState === 'CONFLICT' && 'bg-amber-400',
-                  claimState === 'WAITING' && 'bg-slate-500',
+                  claimState === 'PREEMPTED' && 'bg-ok',
+                  claimState === 'CONFLICT' && 'rotate-45 rounded-none bg-warn',
+                  claimState === 'WAITING' && 'bg-muted',
                 )}
               />
               next {next.entry.name ?? next.entry.signal_id} in {formatDistance(next.distance_m)} ·
               lane {next.entry.lane}
               {claimState && claimState !== 'WAITING' ? (
-                <span className={claimState === 'CONFLICT' ? 'text-amber-300' : 'text-emerald-300'}>
+                <span className={claimState === 'CONFLICT' ? 'text-warn' : 'text-ok'}>
                   {' '}
                   {claimState.toLowerCase()}
                 </span>
@@ -172,7 +169,7 @@ function FleetRow({
             <span>no signals ahead</span>
           ) : null}
           <span title="Estimate: pre-empted junctions passed × city average junction delay">
-            saved ≈ <span className="text-emerald-300">{formatSeconds(savedS)}</span>
+            saved ≈ <span className="tabular-nums text-ok">{formatSeconds(savedS)}</span>
           </span>
         </div>
       </button>

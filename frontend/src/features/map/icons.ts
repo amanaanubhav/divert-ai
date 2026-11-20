@@ -25,7 +25,7 @@ export function signalIcon(): L.DivIcon {
     className: '',
     iconSize: [24, 24],
     iconAnchor: [12, 12],
-    html: `<div class="sig"><span class="sig-ring"></span><span class="sig-approach"><i></i></span><span class="sig-dot"></span><span class="sig-label"></span></div>`,
+    html: `<div class="sig"><span class="sig-approach"><i></i></span><span class="sig-dot"></span><span class="sig-label"></span></div>`,
   })
 }
 

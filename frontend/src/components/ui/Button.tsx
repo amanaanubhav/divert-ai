@@ -1,25 +1,23 @@
 import clsx from 'clsx'
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ComponentPropsWithRef, ReactNode } from 'react'
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger'
 type Size = 'sm' | 'md'
 
 const VARIANT: Record<Variant, string> = {
   primary:
-    'bg-rose-600 text-white hover:bg-rose-500 focus-visible:ring-rose-400 disabled:bg-rose-900/60',
-  secondary:
-    'bg-ink-700 text-slate-100 ring-1 ring-inset ring-white/10 hover:bg-ink-600 focus-visible:ring-sky-400',
-  ghost: 'text-slate-300 hover:bg-white/5 hover:text-white focus-visible:ring-sky-400',
-  danger:
-    'bg-transparent text-red-300 ring-1 ring-inset ring-red-500/40 hover:bg-red-500/10 focus-visible:ring-red-400',
+    'border-primary bg-primary text-on-primary hover:border-primary-hover hover:bg-primary-hover active:bg-primary-active',
+  secondary: 'border-field/60 bg-surface text-fg hover:bg-subtle active:bg-line/60',
+  ghost: 'border-transparent bg-transparent text-fg hover:bg-subtle active:bg-line/60',
+  danger: 'border-bad/50 bg-surface text-bad hover:bg-bad-subtle',
 }
 
 const SIZE: Record<Size, string> = {
   sm: 'h-7 px-2.5 text-xs gap-1.5',
-  md: 'h-9 px-3.5 text-sm gap-2',
+  md: 'h-8 px-3 text-sm gap-2',
 }
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends ComponentPropsWithRef<'button'> {
   variant?: Variant
   size?: Size
   icon?: ReactNode
@@ -38,9 +36,8 @@ export function Button({
     <button
       type={type}
       className={clsx(
-        'inline-flex select-none items-center justify-center rounded-md font-medium transition-colors',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-offset-ink-900',
-        'disabled:cursor-not-allowed disabled:opacity-60',
+        'inline-flex select-none items-center justify-center whitespace-nowrap rounded border font-medium',
+        'disabled:cursor-not-allowed disabled:opacity-55',
         VARIANT[variant],
         SIZE[size],
         className,

@@ -34,12 +34,15 @@ export interface UiState {
 
 const DARK_KEY = 'divert.darkTiles'
 
+/** Stored choice, else the OS colour scheme (light tiles unless the system is in dark mode). */
 function readDark(): boolean {
   try {
-    return localStorage.getItem(DARK_KEY) === '1'
+    const stored = localStorage.getItem(DARK_KEY)
+    if (stored === '1' || stored === '0') return stored === '1'
   } catch {
-    return false
+    // storage blocked: fall through to the system preference
   }
+  return typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches
 }
 
 /** `#/history/kolkata` -> `{tab: 'history', city: 'kolkata'}`. */

@@ -14,7 +14,7 @@ export function LiveMap({ city, incidents }: { city: CityDetail; incidents: read
   const layers = useUiStore((s) => s.layers)
   const dark = useUiStore((s) => s.darkTiles)
   return (
-    <div className="relative h-full min-h-[22rem] overflow-hidden rounded-lg ring-1 ring-white/[0.06]">
+    <div className="relative h-full min-h-[18rem] overflow-hidden rounded border border-line">
       <MapContainer
         center={city.center as [number, number]}
         zoom={city.zoom}
@@ -56,25 +56,25 @@ function MapControls({ signalCount, stationCount }: { signalCount: number; stati
     { key: 'routes', label: 'Routes' },
   ]
   return (
-    <div className="pointer-events-none absolute left-2 top-2 z-[1000] flex flex-col gap-2">
-      <fieldset className="pointer-events-auto rounded-md bg-ink-900/90 p-2 text-xs shadow-lg ring-1 ring-white/10 backdrop-blur">
+    <div className="pointer-events-none absolute left-2 top-2 z-map-overlay flex flex-col gap-2">
+      <fieldset className="pointer-events-auto rounded border border-line bg-surface px-2 py-1.5 text-xs text-fg">
         <legend className="sr-only">Map layers</legend>
         <div className="flex flex-col gap-1">
           {items.map((it) => (
-            <label key={it.key} className="flex cursor-pointer items-center gap-2 text-slate-300">
+            <label key={it.key} className="flex cursor-pointer items-center gap-2 py-0.5">
               <input
                 type="checkbox"
-                className="h-3.5 w-3.5 accent-rose-500"
+                className="h-3.5 w-3.5 accent-primary"
                 checked={layers[it.key]}
                 onChange={() => toggle(it.key)}
               />
               {it.label}
             </label>
           ))}
-          <label className="flex cursor-pointer items-center gap-2 text-slate-300">
+          <label className="flex cursor-pointer items-center gap-2 py-0.5">
             <input
               type="checkbox"
-              className="h-3.5 w-3.5 accent-rose-500"
+              className="h-3.5 w-3.5 accent-primary"
               checked={dark}
               onChange={() => setDark(!dark)}
             />
@@ -84,7 +84,7 @@ function MapControls({ signalCount, stationCount }: { signalCount: number; stati
       </fieldset>
       <div
         className={clsx(
-          'pointer-events-auto hidden rounded-md bg-ink-900/90 p-2 text-[11px] text-slate-300 shadow-lg ring-1 ring-white/10 backdrop-blur sm:block',
+          'pointer-events-auto hidden rounded border border-line bg-surface px-2 py-1.5 text-xs text-fg sm:block',
         )}
         aria-label="Legend"
         role="group"
@@ -94,7 +94,7 @@ function MapControls({ signalCount, stationCount }: { signalCount: number; stati
             <li key={s} className="flex items-center gap-2">
               <span
                 aria-hidden="true"
-                className="h-2.5 w-2.5 rounded-full"
+                className="h-2.5 w-2.5 rounded-full dark:ring-1 dark:ring-white/40"
                 style={{ background: SERVICE_COLOR[s] }}
               />
               {SERVICE_LABEL[s]}
@@ -111,7 +111,7 @@ function MapControls({ signalCount, stationCount }: { signalCount: number; stati
           <li className="flex items-center gap-2">
             <span
               aria-hidden="true"
-              className="h-2.5 w-2.5 rounded-full"
+              className="ml-px h-2 w-2 rotate-45 rounded-[1px]"
               style={{ background: SIGNAL_COLOR.CONFLICT }}
             />
             Conflict

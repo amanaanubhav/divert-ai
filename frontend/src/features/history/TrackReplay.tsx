@@ -5,7 +5,7 @@ import type { IncidentDetail, TrackPoint } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Segmented } from '../../components/ui/Segmented'
 import { formatDuration, formatSpeed } from '../../lib/format'
-import { SERVICE_COLOR } from '../../lib/theme'
+import { SERVICE_COLOR, SIGNAL_COLOR } from '../../lib/theme'
 import { useUiStore } from '../../store/ui'
 import { incidentIcon, vehicleIcon } from '../map/icons'
 import { BaseTiles } from '../map/MapHelpers'
@@ -73,7 +73,7 @@ export function TrackReplay({
 
   return (
     <div className="space-y-2">
-      <div className="h-64 overflow-hidden rounded-md ring-1 ring-white/10 sm:h-72">
+      <div className="h-64 overflow-hidden rounded border border-line sm:h-72">
         <MapContainer
           bounds={bounds}
           boundsOptions={{ padding: [20, 20] }}
@@ -101,7 +101,7 @@ export function TrackReplay({
                   color: '#fff',
                   weight: 1.5,
                   fillOpacity: 1,
-                  fillColor: pre ? (pre.state === 'CONFLICT' ? '#f59e0b' : '#16a34a') : '#64748b',
+                  fillColor: pre ? SIGNAL_COLOR[pre.state] : SIGNAL_COLOR.NORMAL,
                 }}
               >
                 <Tooltip className="divert-tip">
@@ -111,10 +111,10 @@ export function TrackReplay({
               </CircleMarker>
             )
           })}
-          {travelled.length > 1 ? (
+          {travelled.length > 1 && dispatch ? (
             <Polyline
               positions={travelled}
-              pathOptions={{ color: '#f43f5e', weight: 4, opacity: 0.95 }}
+              pathOptions={{ color: SERVICE_COLOR[dispatch.service], weight: 4, opacity: 1 }}
             />
           ) : null}
           <IncidentPin detail={detail} />
@@ -140,7 +140,7 @@ export function TrackReplay({
             }}
             aria-label={playing ? 'Pause replay' : 'Play replay'}
           >
-            {playing ? '❚❚ Pause' : '▶ Play'}
+            {playing ? 'Pause' : 'Play'}
           </Button>
           <label htmlFor={sliderId} className="sr-only">
             Replay position
@@ -156,10 +156,10 @@ export function TrackReplay({
               setPlaying(false)
               setT(Number(e.target.value))
             }}
-            className="min-w-[8rem] flex-1 accent-rose-500"
+            className="min-w-[8rem] flex-1 accent-primary"
             aria-valuetext={`${formatDuration(t / 1000)} of ${formatDuration(replay.durationMs / 1000)}`}
           />
-          <span className="font-mono text-xs tabular-nums text-slate-400">
+          <span className="text-xs tabular-nums text-muted">
             {formatDuration(t / 1000)} / {formatDuration(replay.durationMs / 1000)}
           </span>
           <Segmented
@@ -169,12 +169,12 @@ export function TrackReplay({
             onChange={setSpeed}
             options={SPEEDS.map((s) => ({ value: s, label: `${s}×` }))}
           />
-          <span className="text-xs text-slate-500">
+          <span className="text-xs tabular-nums text-muted">
             {frame ? formatSpeed(frame.speed_mps) : null}
           </span>
         </div>
       ) : (
-        <p className="text-xs text-slate-500">
+        <p className="text-sm text-muted">
           {points.length === 0
             ? 'No recorded positions (retention may have removed them).'
             : 'Only one position sample.'}

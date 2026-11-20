@@ -7,14 +7,14 @@ import { useUiStore } from '../../store/ui'
 import { incidentIcon } from './icons'
 
 /**
- * Raster basemap with OpenStreetMap attribution. Light mode is slightly muted so the
- * overlays carry the colour; dark mode uses VITE_TILE_URL_DARK or, without one, the light
- * tiles through a CSS filter.
+ * Raster basemap with OpenStreetMap attribution. Light mode shows the standard tiles
+ * unfiltered; dark mode uses VITE_TILE_URL_DARK or, without one, the light tiles through a
+ * CSS filter (`.tiles-dark` in index.css).
  */
 export function BaseTiles({ dark }: { dark: boolean }) {
   const darkUrl = config.tiles.dark
   const url = dark && darkUrl ? darkUrl : config.tiles.light
-  const className = dark ? (darkUrl ? '' : 'tiles-dark') : 'tiles-muted'
+  const className = dark && !darkUrl ? 'tiles-dark' : ''
   return (
     <TileLayer
       key={`${url}|${className}`}

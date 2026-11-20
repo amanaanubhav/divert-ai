@@ -8,16 +8,10 @@ export function StatusBadge({ status }: { status: IncidentStatus }) {
   return (
     <span
       className={clsx(
-        'inline-flex items-center whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset',
+        'inline-flex items-center whitespace-nowrap rounded border px-1.5 text-xs font-medium leading-5',
         STATUS_TONE[status],
       )}
     >
-      {status === 'EN_ROUTE' ? (
-        <span
-          aria-hidden="true"
-          className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400"
-        />
-      ) : null}
       {STATUS_LABEL[status]}
     </span>
   )
@@ -25,10 +19,10 @@ export function StatusBadge({ status }: { status: IncidentStatus }) {
 
 export function TypeBadge({ type }: { type: IncidentType }) {
   return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium text-slate-200">
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm font-medium text-fg">
       <span
         aria-hidden="true"
-        className="inline-flex h-4 w-4 items-center justify-center rounded-sm text-[9px] text-white"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-sm text-[10px] text-white dark:ring-1 dark:ring-white/40"
         style={{ backgroundColor: TYPE_COLOR[type] }}
       >
         {SERVICE_GLYPH[SERVICE_FOR_TYPE[type]]}
@@ -46,10 +40,10 @@ export function ServiceDot({
   withLabel?: boolean
 }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-slate-300">
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted">
       <span
         aria-hidden="true"
-        className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[9px] text-white"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white dark:ring-1 dark:ring-white/40"
         style={{ backgroundColor: SERVICE_COLOR[service] }}
       >
         {SERVICE_GLYPH[service]}

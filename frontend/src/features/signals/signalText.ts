@@ -3,7 +3,7 @@ import type { ActiveSignal } from '../../api/types'
 /** `12s · R` (ETA of the winning vehicle to the junction and its lane advisory). */
 export function signalLabel(s: ActiveSignal): string {
   const eta = `${Math.max(0, Math.round(s.eta_s))}s`
-  if (s.state === 'CONFLICT') return `${eta} · ${s.lane} · ${s.claimants.length}× CONFLICT`
+  if (s.state === 'CONFLICT') return `${eta} · ${s.lane} · conflict (${s.claimants.length})`
   return `${eta} · ${s.lane}`
 }
 

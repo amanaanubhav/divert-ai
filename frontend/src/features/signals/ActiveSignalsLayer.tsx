@@ -15,9 +15,9 @@ interface Drawn {
 }
 
 /**
- * Pre-empted (green, pulsing) and conflicted (amber) junctions with the ETA + lane label
- * and an arrow on the approach side. Markers are created once per signal and updated in
- * place each tick so the pulse animation never restarts.
+ * Pre-empted (green dot, blinking) and conflicted (amber diamond) junctions with the ETA +
+ * lane label and an arrow on the approach side. Markers are created once per signal and
+ * updated in place each tick so the blink never restarts.
  */
 export function ActiveSignalsLayer() {
   const map = useMap()

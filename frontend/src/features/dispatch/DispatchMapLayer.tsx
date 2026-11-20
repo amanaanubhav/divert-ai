@@ -5,6 +5,7 @@ import type { CityDetail } from '../../api/types'
 import { toast } from '../../components/ui/toast'
 import { formatDistance } from '../../lib/format'
 import { useUiStore } from '../../store/ui'
+import { MAP_COLOR } from '../../lib/theme'
 import { pendingIcon } from '../map/icons'
 import { checkLocation, nearestStationFor } from './nearest'
 
@@ -50,7 +51,7 @@ export function DispatchMapLayer({ city }: { city: CityDetail }) {
       {near ? (
         <Polyline
           positions={[pending as [number, number], near.station.location as [number, number]]}
-          pathOptions={{ color: '#f43f5e', weight: 2, dashArray: '2 6', opacity: 0.9 }}
+          pathOptions={{ color: MAP_COLOR.pending, weight: 2, dashArray: '2 6', opacity: 0.9 }}
           interactive={false}
         />
       ) : null}

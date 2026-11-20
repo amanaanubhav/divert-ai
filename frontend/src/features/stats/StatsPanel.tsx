@@ -41,7 +41,7 @@ export function StatsPanel({
   return (
     <Panel id="stats" title="Operations" bodyClassName="space-y-3 p-3">
       <div className="grid grid-cols-2 gap-2">
-        <Stat label="Vehicles live" value={Object.keys(vehicles).length} tone="accent" />
+        <Stat label="Vehicles live" value={Object.keys(vehicles).length} />
         <Stat label="Active incidents" value={activeIncidents} />
         <Stat label="Pre-empted" value={preempted} tone="good" />
         <Stat label="Conflicts" value={conflicts} tone={conflicts > 0 ? 'warn' : 'default'} />
@@ -64,25 +64,23 @@ export function StatsPanel({
         />
       </div>
       <div>
-        <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-          Activity
-        </h3>
+        <h3 className="mb-1 text-sm font-semibold text-fg">Activity</h3>
         {feed.length === 0 ? (
-          <p className="text-xs text-slate-600">Waiting for events…</p>
+          <p className="text-sm text-muted">Waiting for events…</p>
         ) : (
           <ol className="max-h-40 space-y-1 overflow-y-auto pr-1" aria-label="Recent activity">
             {feed.map((f) => (
-              <li key={f.id} className="flex gap-2 text-[11px]">
-                <span className="shrink-0 font-mono text-slate-600">
+              <li key={f.id} className="flex gap-2 text-xs">
+                <span className="shrink-0 tabular-nums text-muted">
                   {formatClock(f.ts, city.timezone)}
                 </span>
                 <span
                   className={clsx(
                     'truncate',
-                    f.tone === 'good' && 'text-emerald-300',
-                    f.tone === 'warn' && 'text-amber-300',
-                    f.tone === 'bad' && 'text-red-300',
-                    f.tone === 'info' && 'text-slate-300',
+                    f.tone === 'good' && 'text-ok',
+                    f.tone === 'warn' && 'text-warn',
+                    f.tone === 'bad' && 'text-bad',
+                    f.tone === 'info' && 'text-fg',
                   )}
                 >
                   {f.text}

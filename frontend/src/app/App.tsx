@@ -4,6 +4,7 @@ import { describeError } from '../api/client'
 import { useCity } from '../api/queries'
 import { useCityStream } from '../api/useCityStream'
 import { Toaster } from '../components/ui/Toaster'
+import { useToasts } from '../components/ui/toast'
 import { Spinner } from '../components/ui/Panel'
 import { Button } from '../components/ui/Button'
 import { AnalyticsView } from '../features/analytics/AnalyticsView'
@@ -47,90 +48,95 @@ export function App() {
   useCityStream(cityId)
   const data = city.data?.id === cityId ? city.data : undefined
 
+  // Toasts belong to the view that raised them: drop them when the view changes.
+  useEffect(() => {
+    useToasts.getState().clear()
+  }, [tab, cityId])
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-[3000] focus:rounded focus:bg-rose-600 focus:px-3 focus:py-1 focus:text-white"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-skip focus:rounded focus:bg-primary focus:px-3 focus:py-1 focus:text-on-primary"
       >
         Skip to content
       </a>
-      <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-white/[0.06] bg-ink-950 px-3 py-2 shadow-md">
-        <div className="flex items-center gap-2">
-          <span
-            aria-hidden="true"
-            className="flex h-7 w-7 items-center justify-center rounded-md bg-rose-600 text-sm font-black text-white shadow shadow-rose-900/50"
-          >
-            D
-          </span>
-          <div className="leading-tight">
-            <div className="text-sm font-black tracking-[0.2em] text-white">DIVERT</div>
-            <div className="text-[10px] font-medium uppercase tracking-wider text-rose-300/80">
-              Green corridor ops
+      {/* `relative z-header`: the header (and its popover) always paint above the content and
+          its maps; see lib/zIndex.ts. */}
+      <header className="relative z-header flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-1 border-b border-line bg-surface px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-4 sm:gap-6">
+          <div className="py-2 leading-tight">
+            <div className="text-base font-semibold text-fg">DIVERT</div>
+            <div className="hidden text-xs text-muted sm:block">Emergency dispatch console</div>
+          </div>
+          <nav aria-label="Views" className="self-stretch">
+            <div role="tablist" aria-label="Views" className="flex h-full">
+              {TABS.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="tab"
+                  id={`tab-${t}`}
+                  aria-selected={tab === t}
+                  aria-controls="main"
+                  onClick={() => setTab(t)}
+                  className={clsx(
+                    'focus-inset -mb-px min-h-[2.75rem] border-b-2 px-3 text-sm font-medium',
+                    tab === t
+                      ? 'border-accent text-fg'
+                      : 'border-transparent text-muted hover:border-line hover:text-fg',
+                  )}
+                >
+                  {TAB_LABEL[t]}
+                </button>
+              ))}
             </div>
-          </div>
+          </nav>
         </div>
-        <nav aria-label="Views">
-          <div role="tablist" aria-label="Views" className="flex gap-1">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                type="button"
-                role="tab"
-                id={`tab-${t}`}
-                aria-selected={tab === t}
-                aria-controls="main"
-                onClick={() => setTab(t)}
-                className={clsx(
-                  'rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
-                  tab === t
-                    ? 'bg-white/10 text-white'
-                    : 'text-slate-400 hover:bg-white/5 hover:text-white',
-                )}
-              >
-                {TAB_LABEL[t]}
-              </button>
-            ))}
+        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 py-1.5">
+          <CitySwitcher />
+          <div className="flex items-center gap-3">
+            <ConnectionStatus timeZone={data?.timezone ?? 'Asia/Kolkata'} />
+            <ApiKeyButton />
           </div>
-        </nav>
-        <CitySwitcher />
-        <div className="ml-auto flex items-center gap-3">
-          <ConnectionStatus timeZone={data?.timezone ?? 'Asia/Kolkata'} />
-          <ApiKeyButton />
         </div>
       </header>
 
-      <main
-        id="main"
-        role="tabpanel"
-        aria-labelledby={`tab-${tab}`}
-        className="min-h-0 flex-1"
-        tabIndex={-1}
-      >
-        {data ? (
-          tab === 'live' ? (
-            <LiveView key={data.id} city={data} />
-          ) : tab === 'history' ? (
-            <HistoryView key={data.id} city={data} />
+      {/* The content area scrolls on its own (stacked layouts on small screens); the toasts
+          are anchored to its top, below the header. */}
+      <div className="relative min-h-0 flex-1">
+        <main
+          id="main"
+          role="tabpanel"
+          aria-labelledby={`tab-${tab}`}
+          className="h-full overflow-y-auto"
+          tabIndex={-1}
+        >
+          {data ? (
+            tab === 'live' ? (
+              <LiveView key={data.id} city={data} />
+            ) : tab === 'history' ? (
+              <HistoryView key={data.id} city={data} />
+            ) : (
+              <AnalyticsView city={data} />
+            )
+          ) : city.isError ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+              <p className="text-fg">
+                Could not load {cityId}: {describeError(city.error)}
+              </p>
+              <Button variant="primary" onClick={() => void city.refetch()}>
+                Retry
+              </Button>
+            </div>
           ) : (
-            <AnalyticsView city={data} />
-          )
-        ) : city.isError ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-            <p className="text-slate-300">
-              Could not load {cityId}: {describeError(city.error)}
-            </p>
-            <Button variant="primary" onClick={() => void city.refetch()}>
-              Retry
-            </Button>
-          </div>
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <Spinner label={`Loading ${cityId}`} />
-          </div>
-        )}
-      </main>
-      <Toaster />
+            <div className="flex h-full items-center justify-center">
+              <Spinner label={`Loading ${cityId}`} />
+            </div>
+          )}
+        </main>
+        <Toaster className="absolute inset-x-0 top-2" />
+      </div>
     </div>
   )
 }

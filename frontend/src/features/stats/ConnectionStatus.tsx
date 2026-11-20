@@ -23,47 +23,38 @@ export function ConnectionStatus({ timeZone }: { timeZone: string }) {
 
   const tone =
     conn.status === 'open'
-      ? 'bg-emerald-400'
+      ? 'bg-ok'
       : conn.status === 'connecting' || conn.status === 'reconnecting'
-        ? 'bg-amber-400'
-        : 'bg-red-500'
+        ? 'bg-warn'
+        : 'bg-bad'
 
   return (
     <div className="flex items-center gap-3 text-xs" aria-live="polite">
-      <span
-        className="inline-flex items-center gap-1.5 text-slate-300"
-        title={`Stream: ${conn.status}`}
-      >
-        <span className="relative flex h-2 w-2">
-          {conn.status === 'open' ? (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-          ) : null}
-          <span className={clsx('relative inline-flex h-2 w-2 rounded-full', tone)} />
-        </span>
+      <span className="inline-flex items-center gap-1.5 text-fg" title={`Stream: ${conn.status}`}>
+        {/* A static status dot: colour + the text label next to it. */}
+        <span aria-hidden="true" className={clsx('inline-block h-2 w-2 rounded-full', tone)} />
         {LABEL[conn.status]}
         {conn.status === 'reconnecting' && conn.retryInMs != null ? (
-          <span className="text-slate-500">({Math.ceil(conn.retryInMs / 1000)} s)</span>
+          <span className="text-muted">({Math.ceil(conn.retryInMs / 1000)} s)</span>
         ) : null}
       </span>
       <span
         className="hidden items-center gap-1 sm:inline-flex"
         title="Simulation clock (city local time)"
       >
-        <span className="text-slate-500">sim</span>
-        <span className="font-mono tabular-nums text-slate-200">
-          {formatClock(simTs, timeZone)}
-        </span>
+        <span className="text-muted">Sim time</span>
+        <span className="tabular-nums text-fg">{formatClock(simTs, timeZone)}</span>
       </span>
       {degraded ? (
         <span
-          className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-300 ring-1 ring-inset ring-amber-400/30"
+          className="rounded border border-warn/40 bg-warn-subtle px-1.5 py-0.5 font-medium text-warn"
           title={
             ready.isError
               ? 'API not ready'
               : `Worker ${workerStatus ?? 'unknown'}: vehicles may pause; dispatches still queue`
           }
         >
-          {ready.isError ? 'API not ready' : `worker ${workerStatus ?? '?'}`}
+          {ready.isError ? 'API not ready' : `Worker ${workerStatus ?? '?'}`}
         </span>
       ) : null}
     </div>

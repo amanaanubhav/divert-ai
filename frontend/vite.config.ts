@@ -23,6 +23,8 @@ export default defineConfig(({ mode }) => {
       target: 'es2022',
       sourcemap: true,
       chunkSizeWarningLimit: 700,
+      // Never inline fonts as data: URIs: the nginx CSP only allows font-src 'self'.
+      assetsInlineLimit: (file: string) => (/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined),
     },
     test: {
       environment: 'jsdom',

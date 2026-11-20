@@ -27,6 +27,19 @@ import { IncidentDrawer } from './IncidentDrawer'
 type TypeFilter = 'ALL' | IncidentType
 const PAGE_SIZE = 50
 
+/** Table header cell; the bottom rule is an inset shadow so it stays on the sticky header. */
+const TH = 'px-3 py-2 font-medium shadow-[inset_0_-1px_0_rgb(var(--c-line))]'
+const COLUMNS: { key: string; label: string; className?: string }[] = [
+  { key: 'reported', label: 'Reported' },
+  { key: 'type', label: 'Type' },
+  { key: 'status', label: 'Status' },
+  { key: 'response', label: 'Response' },
+  // coordinates only where there is room; the drawer always shows the incident
+  { key: 'location', label: 'Location', className: 'hidden xl:table-cell' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'details', label: 'Details' },
+]
+
 /** Filterable, keyset-paginated incident history of the city (PostgreSQL). */
 export function HistoryView({ city }: { city: CityDetail }) {
   const [type, setType] = useState<TypeFilter>('ALL')
@@ -62,14 +75,14 @@ export function HistoryView({ city }: { city: CityDetail }) {
     setStatuses((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-3">
+    <div className="flex min-h-full flex-col gap-3 p-3 lg:h-full lg:min-h-0">
       <Panel
         id="history-filters"
         title={`${city.name} incident history`}
         bodyClassName="flex flex-wrap items-end gap-4 p-3"
       >
         <div className="space-y-1">
-          <span className="block text-[11px] font-medium text-slate-400">Type</span>
+          <span className="block text-sm font-medium text-fg">Type</span>
           <Segmented
             label="Type filter"
             size="sm"
@@ -82,7 +95,7 @@ export function HistoryView({ city }: { city: CityDetail }) {
           />
         </div>
         <fieldset className="space-y-1">
-          <legend className="mb-1 block text-[11px] font-medium text-slate-400">Status</legend>
+          <legend className="mb-1 block text-sm font-medium text-fg">Status</legend>
           <div className="flex flex-wrap gap-1">
             {INCIDENT_STATUSES.map((s) => {
               const on = statuses.includes(s)
@@ -93,10 +106,10 @@ export function HistoryView({ city }: { city: CityDetail }) {
                   aria-pressed={on}
                   onClick={() => toggleStatus(s)}
                   className={clsx(
-                    'rounded px-2 py-0.5 text-xs ring-1 ring-inset transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                    'h-7 rounded border px-2 text-xs font-medium',
                     on
-                      ? 'bg-rose-600 text-white ring-rose-500'
-                      : 'text-slate-300 ring-white/10 hover:bg-white/5',
+                      ? 'border-primary bg-primary text-on-primary'
+                      : 'border-field/60 bg-surface text-fg hover:bg-subtle',
                   )}
                 >
                   {STATUS_LABEL[s]}
@@ -107,7 +120,7 @@ export function HistoryView({ city }: { city: CityDetail }) {
         </fieldset>
         <div className="flex items-end gap-2">
           <div>
-            <label htmlFor={fromId} className="block text-[11px] font-medium text-slate-400">
+            <label htmlFor={fromId} className="block text-sm font-medium text-fg">
               From
             </label>
             <input
@@ -115,11 +128,11 @@ export function HistoryView({ city }: { city: CityDetail }) {
               type="date"
               value={fromDay}
               onChange={(e) => setFromDay(e.target.value)}
-              className="mt-1 rounded-md border-0 bg-ink-800 px-2 py-1 text-xs text-slate-100 ring-1 ring-inset ring-white/10 focus:ring-2 focus:ring-sky-400"
+              className="mt-1 h-7 rounded border border-field bg-surface px-2 text-sm text-fg aria-[invalid=true]:border-bad"
             />
           </div>
           <div>
-            <label htmlFor={toId} className="block text-[11px] font-medium text-slate-400">
+            <label htmlFor={toId} className="block text-sm font-medium text-fg">
               To (inclusive)
             </label>
             <input
@@ -128,7 +141,7 @@ export function HistoryView({ city }: { city: CityDetail }) {
               value={toDay}
               onChange={(e) => setToDay(e.target.value)}
               aria-invalid={rangeInvalid}
-              className="mt-1 rounded-md border-0 bg-ink-800 px-2 py-1 text-xs text-slate-100 ring-1 ring-inset ring-white/10 focus:ring-2 focus:ring-sky-400"
+              className="mt-1 h-7 rounded border border-field bg-surface px-2 text-sm text-fg aria-[invalid=true]:border-bad"
             />
           </div>
         </div>
@@ -146,7 +159,7 @@ export function HistoryView({ city }: { city: CityDetail }) {
             Reset filters
           </Button>
         ) : null}
-        <p className="ml-auto text-[11px] text-slate-500">Dates in {city.timezone}</p>
+        <p className="ml-auto text-xs text-muted">Dates in {city.timezone}</p>
       </Panel>
 
       <Panel
@@ -166,36 +179,20 @@ export function HistoryView({ city }: { city: CityDetail }) {
         ) : items.length === 0 ? (
           <EmptyState>No incidents match these filters.</EmptyState>
         ) : (
-          <table className="w-full min-w-[44rem] text-left text-sm">
-            <thead className="sticky top-0 z-10 bg-ink-900 text-[10px] uppercase tracking-wider text-slate-500">
+          <table className="w-full min-w-[36rem] text-left text-sm">
+            <thead className="sticky top-0 z-sticky bg-subtle text-xs text-muted">
               <tr>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Reported
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Type
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Status
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Response
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Location
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Notes
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  <span className="sr-only">Details</span>
-                </th>
+                {COLUMNS.map((c) => (
+                  <th key={c.key} scope="col" className={clsx(TH, c.className)}>
+                    {c.key === 'details' ? <span className="sr-only">{c.label}</span> : c.label}
+                  </th>
+                ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/[0.05]">
+            <tbody className="divide-y divide-line">
               {items.map((inc) => (
-                <tr key={inc.id} className="hover:bg-white/[0.03]">
-                  <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-300">
+                <tr key={inc.id} className="hover:bg-subtle/60">
+                  <td className="whitespace-nowrap px-3 py-2 tabular-nums text-fg">
                     {formatDateTime(inc.reported_at, city.timezone)}
                   </td>
                   <td className="px-3 py-2">
@@ -204,13 +201,13 @@ export function HistoryView({ city }: { city: CityDetail }) {
                   <td className="px-3 py-2">
                     <StatusBadge status={inc.status} />
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-300">
+                  <td className="px-3 py-2 tabular-nums text-fg">
                     {formatDuration(secondsBetween(inc.reported_at, inc.on_scene_at))}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-500">
+                  <td className="hidden whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted xl:table-cell">
                     {formatLatLng(inc.location)}
                   </td>
-                  <td className="max-w-[16rem] truncate px-3 py-2 text-xs text-slate-400">
+                  <td className="max-w-[16rem] truncate px-3 py-2 text-muted">
                     {inc.description ?? ''}
                   </td>
                   <td className="px-3 py-2 text-right">

@@ -7,7 +7,7 @@ export interface SegmentOption<T extends string> {
   title?: string
 }
 
-/** A radio group styled as a segmented control (arrow keys move between options). */
+/** A radio group styled as a plain button group (arrow keys move between options). */
 export function Segmented<T extends string>({
   label,
   value,
@@ -25,7 +25,7 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       aria-label={label}
-      className="inline-flex rounded-md bg-ink-800 p-0.5 ring-1 ring-inset ring-white/10"
+      className="inline-flex max-w-full flex-wrap rounded border border-field/60 bg-surface"
     >
       {options.map((o, i) => {
         const checked = o.value === value
@@ -57,9 +57,10 @@ export function Segmented<T extends string>({
               btn?.focus()
             }}
             className={clsx(
-              'rounded font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
-              size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-3 py-1 text-sm',
-              checked ? 'bg-rose-600 text-white shadow' : 'text-slate-300 hover:text-white',
+              'whitespace-nowrap font-medium first:rounded-l-[3px] last:rounded-r-[3px]',
+              i > 0 && 'border-l border-field/60',
+              size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-sm',
+              checked ? 'bg-primary text-on-primary' : 'text-fg hover:bg-subtle',
             )}
           >
             {o.label}

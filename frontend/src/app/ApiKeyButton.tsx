@@ -13,19 +13,19 @@ export function ApiKeyButton() {
     <div className="relative">
       <Button
         size="sm"
-        variant="ghost"
+        variant="secondary"
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
         title="API key for dispatch and cancel"
       >
-        <span aria-hidden="true">⚿</span>
-        <span className="hidden md:inline">{hasKey ? 'Key set' : 'API key'}</span>
+        <span className="md:hidden">{hasKey ? 'Key set' : 'Key'}</span>
+        <span className="hidden md:inline">{hasKey ? 'API key set' : 'API key'}</span>
       </Button>
       {open ? (
         <form
           id={id}
-          className="absolute right-0 top-9 z-[1600] w-72 space-y-2 rounded-lg bg-ink-800 p-3 shadow-xl ring-1 ring-white/10"
+          className="absolute right-0 top-full z-popover mt-1 w-72 max-w-[calc(100vw-1.5rem)] space-y-2 rounded border border-line bg-surface p-3 shadow"
           onSubmit={(e) => {
             e.preventDefault()
             const v = inputRef.current?.value.trim() ?? ''
@@ -35,8 +35,9 @@ export function ApiKeyButton() {
             toast.info(v ? 'API key saved' : 'API key cleared', 'Stored in this browser only.')
           }}
         >
-          <label htmlFor={`${id}-input`} className="block text-xs font-medium text-slate-300">
-            X-API-Key (only if the server requires one)
+          <label htmlFor={`${id}-input`} className="block text-sm font-medium text-fg">
+            X-API-Key{' '}
+            <span className="font-normal text-muted">(only if the server requires one)</span>
           </label>
           <input
             ref={inputRef}
@@ -44,7 +45,7 @@ export function ApiKeyButton() {
             type="password"
             autoComplete="off"
             defaultValue={getApiKey() ?? ''}
-            className="w-full rounded-md border-0 bg-ink-900 px-2 py-1.5 text-sm text-slate-100 ring-1 ring-inset ring-white/10 focus:ring-2 focus:ring-sky-400"
+            className="h-8 w-full rounded border border-field bg-surface px-2 text-sm text-fg"
           />
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>

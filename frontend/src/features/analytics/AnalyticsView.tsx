@@ -13,7 +13,7 @@ import {
 import { EmptyState, Panel, Spinner, Stat } from '../../components/ui/Panel'
 import { Segmented } from '../../components/ui/Segmented'
 import { formatPercent, formatSeconds, STATUS_LABEL, TYPE_LABEL } from '../../lib/format'
-import { TYPE_COLOR } from '../../lib/theme'
+import { CHART_NEUTRAL, SIGNAL_COLOR, TYPE_COLOR } from '../../lib/theme'
 import { presetRange, RANGE_PRESETS, type RangePreset } from '../../lib/time'
 import { useNow } from '../../lib/useNow'
 import { useUiStore } from '../../store/ui'
@@ -45,9 +45,9 @@ export function AnalyticsView({ city }: { city: CityDetail }) {
   })
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
+    <div className="flex flex-col gap-3 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold text-slate-100">Analytics</h1>
+        <h1 className="text-lg font-semibold text-fg">Analytics</h1>
         <Segmented
           label="Time range"
           size="sm"
@@ -69,15 +69,15 @@ export function AnalyticsView({ city }: { city: CityDetail }) {
               onClick={() => setCity(c.id)}
               aria-pressed={selected}
               className={clsx(
-                'rounded-lg p-3 text-left ring-1 ring-inset transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                'rounded border p-3 text-left',
                 selected
-                  ? 'bg-rose-500/10 ring-rose-500/50'
-                  : 'bg-ink-900 ring-white/[0.06] hover:bg-ink-800',
+                  ? 'border-accent bg-primary-subtle shadow-[inset_0_0_0_1px_rgb(var(--c-accent))]'
+                  : 'border-line bg-surface hover:bg-subtle/60',
               )}
             >
               <div className="flex items-baseline justify-between">
-                <span className="font-semibold text-slate-100">{c.name}</span>
-                <span className="text-[11px] text-slate-500">last {PRESET_LABEL[preset]}</span>
+                <span className="font-semibold text-fg">{c.name}</span>
+                <span className="text-xs text-muted">Last {PRESET_LABEL[preset]}</span>
               </div>
               {d ? (
                 <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
@@ -89,7 +89,7 @@ export function AnalyticsView({ city }: { city: CityDetail }) {
                   <CardStat label="Saved (est.)" value={formatSeconds(d.est_time_saved_s.total)} />
                 </dl>
               ) : q?.isError ? (
-                <p className="mt-2 text-xs text-red-300">Unavailable</p>
+                <p className="mt-2 text-sm text-bad">Unavailable</p>
               ) : (
                 <div className="mt-2">
                   <Spinner label="Loading" />
@@ -114,8 +114,8 @@ export function AnalyticsView({ city }: { city: CityDetail }) {
 function CardStat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-wider text-slate-500">{label}</dt>
-      <dd className="font-mono text-sm tabular-nums text-slate-100">{value}</dd>
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className="text-sm font-medium tabular-nums text-fg">{value}</dd>
     </div>
   )
 }
@@ -174,7 +174,7 @@ function CityCharts({ d, cityName }: { d: AnalyticsSummary; cityName: string }) 
             })}
           />
         )}
-        <p className="mt-3 text-[11px] text-slate-500">
+        <p className="mt-3 text-xs text-muted">
           Response = (dispatch − report) + simulated travel to scene; percentiles via PostgreSQL
           percentile_cont.
         </p>
@@ -201,7 +201,7 @@ function CityCharts({ d, cityName }: { d: AnalyticsSummary; cityName: string }) 
             key: s,
             label: STATUS_LABEL[s],
             value: d.incidents.by_status[s] ?? 0,
-            color: '#94a3b8',
+            color: CHART_NEUTRAL,
             title: `${STATUS_LABEL[s]}: ${d.incidents.by_status[s] ?? 0}`,
             display: String(d.incidents.by_status[s] ?? 0),
           }))}
@@ -221,23 +221,21 @@ function CityCharts({ d, cityName }: { d: AnalyticsSummary; cityName: string }) 
         </div>
         {d.preemptions.top_signals.length > 0 ? (
           <div>
-            <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-              Busiest junctions
-            </h3>
+            <h3 className="mb-1.5 text-sm font-semibold text-fg">Busiest junctions</h3>
             <BarList
               caption="Most frequently pre-empted junctions"
               data={d.preemptions.top_signals.map((s) => ({
                 key: s.signal_id,
                 label: <span className="font-mono">{s.signal_id}</span>,
                 value: s.count,
-                color: '#16a34a',
+                color: SIGNAL_COLOR.PREEMPTED,
                 title: `${s.signal_id}: pre-empted ${s.count} times`,
                 display: String(s.count),
               }))}
             />
           </div>
         ) : null}
-        <p className="text-[11px] text-slate-500">{d.est_time_saved_s.note}</p>
+        <p className="text-xs text-muted">{d.est_time_saved_s.note}</p>
       </Panel>
     </div>
   )
