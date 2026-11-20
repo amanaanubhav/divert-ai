@@ -1,0 +1,26 @@
+# ingress-nginx: WebSocket upgrades are handled natively; long proxy timeouts keep
+# /api/v1/cities/{city}/stream connections open.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: divert
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [divert.example.org]
+      secretName: divert-tls
+  rules:
+    - host: divert.example.org
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: divert-api, port: { name: http } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: divert-frontend, port: { name: http } } }

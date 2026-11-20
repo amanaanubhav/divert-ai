@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: divert-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: divert-frontend }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: divert-frontend }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: divert-frontend
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # nginx resolves the API per request (kube-dns, no search domains): full name.
+            # Change cluster.local if the cluster uses another domain.
+            - name: DIVERT_API_UPSTREAM
+              value: divert-api.$(POD_NAMESPACE).svc.cluster.local:80
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+          livenessProbe:
+            httpGet: { path: /nginx-health, port: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: divert-frontend
+spec:
+  selector: { app.kubernetes.io/name: divert-frontend }
+  ports:
+    - { name: http, port: 80, targetPort: http }

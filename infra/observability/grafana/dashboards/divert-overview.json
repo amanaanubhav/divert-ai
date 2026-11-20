@@ -1,0 +1,366 @@
+{
+  "uid": "divert-overview",
+  "title": "DIVERT overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "tags": [
+    "divert"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Dispatches / min by outcome",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(divert_dispatches_total[5m])) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "title": "Active vehicles",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (city) (max by (city) (divert_active_vehicles{job=\"divert-worker\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "title": "Tick duration p95 (s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(divert_tick_duration_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      }
+    },
+    {
+      "id": 4,
+      "title": "OSRM latency p95 (s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(divert_osrm_request_duration_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      }
+    },
+    {
+      "id": 5,
+      "title": "OSRM errors / min",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(divert_osrm_errors_total[5m])) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "id": 6,
+      "title": "Pre-emptions / min",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (city, state) (rate(divert_preemptions_total[5m])) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      }
+    },
+    {
+      "id": 7,
+      "title": "Persister lag (s)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(divert_persister_lag_seconds)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 21
+      }
+    },
+    {
+      "id": 8,
+      "title": "History stream lag (entries)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(divert_history_stream_lag)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 21
+      }
+    },
+    {
+      "id": 9,
+      "title": "Outbox backlog (rows)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(divert_outbox_backlog)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 21
+      }
+    },
+    {
+      "id": 10,
+      "title": "Worker heartbeat age (s)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(divert_worker_heartbeat_age_seconds)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 21
+      }
+    },
+    {
+      "id": 11,
+      "title": "Leader",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(divert_worker_is_leader)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 28
+      }
+    },
+    {
+      "id": 12,
+      "title": "DLQ messages",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(divert_dlq_messages_total)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 28
+      }
+    },
+    {
+      "id": 13,
+      "title": "HTTP p95 by route (s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(divert_http_request_duration_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      }
+    },
+    {
+      "id": 14,
+      "title": "WebSocket clients",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "divert-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (city) (divert_ws_clients)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "divert-prometheus"
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      }
+    }
+  ]
+}

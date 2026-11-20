@@ -1,0 +1,77 @@
+# Two replicas: one leader (Redis lock SET NX PX + renewal) runs the simulation tick,
+# the other is a hot standby that takes over within DIVERT_LEADER_LOCK_TTL_MS.
+# Liveness = the process serves :9100/metrics. A hung event loop cannot renew the lease,
+# so the standby takes over within the TTL regardless of the probe.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: divert-worker
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: divert-worker }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: divert-worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: { app.kubernetes.io/name: divert-worker }
+      containers:
+        - name: worker
+          image: divert-backend
+          args: ["python", "-m", "divert.worker"]
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          envFrom:
+            - configMapRef: { name: divert-config }
+            - secretRef: { name: divert-secrets }
+          env:
+            - { name: DIVERT_METRICS_PORT, value: "9100" }
+            - name: DIVERT_INSTANCE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          startupProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: divert-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: divert-worker }
