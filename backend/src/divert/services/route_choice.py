@@ -299,6 +299,28 @@ def _differences(winner: Candidate, other: Candidate) -> list[str]:
     return notes
 
 
+def _gain_reason(chosen: Candidate, runner: Candidate) -> str:
+    """Why ``chosen`` beat the next-cheapest ``runner``. "Faster" only when its predicted
+    travel time is lower (at the 0.1 min shown); otherwise it won on cost - the turn
+    delays and contention penalties added to the travel time."""
+    faster_min = (runner.eta_s - chosen.eta_s) / 60.0
+    if round(faster_min, 1) > 0:
+        return f"Route {chosen.label}: {faster_min:.1f} min faster than {runner.label}"
+    why = []
+    if runner.junction_delay_s > chosen.junction_delay_s:
+        why.append("turn delays")
+    if runner.penalties_s > chosen.penalties_s:
+        why.append("junction contention")
+    reason = f"Route {chosen.label}: preferred over {runner.label}"
+    if why:
+        cheaper_min = (runner.cost_s - chosen.cost_s) / 60.0
+        reason += f", {cheaper_min:.1f} min cheaper overall on {' and '.join(why)}"
+    slower_min = -faster_min
+    if round(slower_min, 1) > 0:
+        return reason + f", though {slower_min:.1f} min slower"
+    return reason + ", same travel time"
+
+
 def choose(candidates: Sequence[Candidate], *, tie_share: float = TIE_SHARE) -> Choice:
     """Pick the best candidate and explain why (see module doc)."""
     if not candidates:
@@ -322,9 +344,8 @@ def choose(candidates: Sequence[Candidate], *, tie_share: float = TIE_SHARE) -> 
         reason = f"Route {chosen.label}: within {tie_share:.0%} of {cheapest.label}, {tie_break}"
     else:
         runner = others[0]
-        gain = (runner.cost_s - chosen.cost_s) / 60.0
         notes = _differences(chosen, runner)
-        reason = f"Route {chosen.label}: {gain:.1f} min faster than {runner.label}"
+        reason = _gain_reason(chosen, runner)
         if notes:
             reason += f" ({runner.label}: {', '.join(notes)})"
     return Choice(chosen, tuple(candidates), reason, tie_break)

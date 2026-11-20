@@ -15,6 +15,7 @@ from divert.domain.signal_plan import PhasePlan
 from divert.services.eta import KinematicEtaModel, expected_signal_wait_s
 from divert.services.route_choice import (
     CANDIDATE_MAX_POINTS,
+    Candidate,
     candidate_polyline,
     choose,
     junction_delay_s,
@@ -220,3 +221,40 @@ def test_a_long_winding_candidate_is_capped() -> None:
     line = candidate_polyline(route)
     assert 2 <= len(line) <= CANDIDATE_MAX_POINTS
     assert line[0] == [round(ORIGIN.lat, 5), round(ORIGIN.lng, 5)]
+
+
+# ------------------------------------------------ "why this route" wording (fix-3)
+
+
+def _cand(label: str, route: Route, eta_s: float, junction_s: float, right_turns: int) -> Candidate:
+    return Candidate(
+        label, "osrm", route, (), eta_s=eta_s, base_s=eta_s, junction_delay_s=junction_s,
+        penalties_s=0.0, crowd_index=0.0, right_turns=right_turns,
+    )  # fmt: skip
+
+
+def test_reason_says_faster_only_when_the_travel_time_is_lower() -> None:
+    a, b = two_routes()
+    # B drives 24 s faster and has one right turn fewer: "faster" by the travel time
+    choice = choose([_cand("A", a, 240.0, 6.0, 1), _cand("B", b, 216.0, 0.0, 0)])
+    assert choice.chosen.label == "B"
+    assert choice.reason == "Route B: 0.4 min faster than A (A: 1 extra right turn)"
+
+
+def test_reason_says_cheaper_overall_when_not_faster() -> None:
+    a, b = two_routes()
+    # the live case: B 3:37, A 3:36 - B only wins on A's extra right turn (6 s)
+    choice = choose([_cand("A", a, 216.0, 6.0, 1), _cand("B", b, 217.0, 0.0, 0)])
+    assert choice.chosen.label == "B"
+    assert choice.tie_break is None
+    assert "faster" not in choice.reason
+    assert choice.reason == (
+        "Route B: preferred over A, 0.1 min cheaper overall on turn delays, same travel time"
+        " (A: 1 extra right turn)"
+    )
+    # clearly slower but still cheaper (A has 40 s of turn delays): says so
+    slow = choose([_cand("A", a, 200.0, 40.0, 0), _cand("B", b, 215.0, 0.0, 0)])
+    assert slow.chosen.label == "B"
+    assert slow.reason == (
+        "Route B: preferred over A, 0.4 min cheaper overall on turn delays, though 0.2 min slower"
+    )

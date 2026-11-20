@@ -154,7 +154,12 @@ Request:
 route order (`pass_no` > 0 when the route crosses the same junction again), with the
 movement there and the lane advice (lanes from the kerb; `side` / `lane` is `L`, `C` or
 `R` - India drives on the left). `route_choice` explains which of the scored candidates
-(OSRM alternatives and detours, all stations) was chosen and why; it is also stored in the
+(OSRM alternatives and detours, all stations) was chosen and why. `reason` says
+"X min faster than B" only when the chosen route's predicted travel time
+(`congested_time_s`) is lower; a route that wins on cost alone reads "Route A: preferred
+over B, 0.1 min cheaper overall on turn delays [and junction contention], same travel time"
+(or ", though 0.2 min slower"); near-equal costs read "within 5 % of B, fewer right turns"
+(stage 5 fix-3; earlier rows said "faster" from the cost difference). It is also stored in the
 `dispatched` timeline event and returned in the incident detail (`dispatches[].route_choice`
 and `legs[0].route_choice`). Every candidate carries `route`, its geometry for drawing the
 alternatives: `[[lat, lng], ...]` simplified with Douglas-Peucker at 10 m (the tolerance
@@ -278,7 +283,8 @@ Incident fields (incl. `hospital_station_id`, `transport_started_at`, `at_hospit
 is `SCENE` | `HOSPITAL` | `STATION`; `end_reason` `ARRIVED` | `CANCELLED` | `FAILED` |
 `SUPERSEDED` (planned, never started) or null while driven; `actual_travel_s` and
 `*_trip_s` are **simulated** seconds (`*_trip_s` since the dispatch started);
-`eta_error_pct` = (actual - predicted) / actual x 100 (the +-10 % guarantee);
+`eta_error_pct` = (actual - predicted) / actual x 100 (the +-10 % guarantee), null unless
+`end_reason` is `ARRIVED` (a cancelled, failed or superseded leg has no meaningful error);
 `hospital_choice` only on TRANSPORT (every hospital considered, the chosen one and why);
 `reroutes` counts applied re-routes (the route is then the spliced one).
 `hospital` is the incident's destination hospital (null unless transported);
