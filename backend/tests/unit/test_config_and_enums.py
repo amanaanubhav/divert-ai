@@ -28,10 +28,36 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_defaults_match_spec() -> None:
     s = Settings()
     assert s.osrm_url == "https://router.project-osrm.org"
-    assert (s.corridor_m, s.preempt_lead_s, s.preempt_distance_m) == (30, 45, 600)
-    assert (s.sim_tick_s, s.sim_time_scale, s.scene_time_s) == (0.5, 1.0, 120)
+    assert (s.corridor_m, s.preempt_max_lead_s, s.preempt_min_claim_distance_m) == (30, 90, 150)
+    assert (s.preempt_max_hold_s, s.priority_window_s, s.preempt_recovery_s) == (60, 10, 20)
+    assert (s.preempt_release_past_m, s.preempt_release_past_large_m) == (20, 30)
+    assert (s.route_alternatives, s.route_detours) == (3, 2)
+    assert (s.sim_tick_s, s.sim_time_scale, s.scene_time_s) == (0.5, 1.0, None)
+    # dwell times (design §1)
+    assert (s.scene_time_ambulance_s, s.scene_time_fire_engine_s, s.scene_time_police_s) == (
+        480,
+        1200,
+        600,
+    )
+    assert s.hospital_handover_s == 600
+    assert (s.leg_plan_backoff_s, s.leg_plan_backoff_max_s, s.hospital_candidates) == (2, 60, 6)
+    assert (s.reroute_min_saving_s, s.reroute_max_per_leg) == (60, 2)
+    assert (s.reroute_behind_share, s.reroute_behind_s) == (0.25, 60)
     assert s.units_per_station == 2
     assert s.api_key is None
+
+
+def test_deprecated_scene_time_is_only_a_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DIVERT_SCENE_TIME_S", "90")
+    monkeypatch.setenv("DIVERT_SCENE_TIME_POLICE_S", "300")
+    s = Settings()
+    assert s.scene_time_for("AMBULANCE") == 90  # not set per service: the old setting
+    assert s.scene_time_for("FIRE_ENGINE") == 90
+    assert s.scene_time_for("POLICE") == 300  # the per-service setting wins
+    assert Settings().model_copy(update={"scene_time_s": 5.0}).scene_time_for("POLICE") == 300
+    monkeypatch.delenv("DIVERT_SCENE_TIME_S")
+    monkeypatch.delenv("DIVERT_SCENE_TIME_POLICE_S")
+    assert Settings().scene_time_for("AMBULANCE") == 480
 
 
 def test_wildcard_cors_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

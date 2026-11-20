@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 
 EXPECTED_TABLES = {
     "cities", "stations", "units", "signals", "incidents", "dispatches",
-    "signal_preemptions", "incident_events", "vehicle_positions", "outbox",
+    "signal_preemptions", "incident_events", "vehicle_positions", "outbox", "dispatch_legs",
 }  # fmt: skip
 
 
@@ -42,7 +42,7 @@ async def test_head_has_all_tables_and_postgis(engine: AsyncEngine) -> None:
     from alembic.script import ScriptDirectory  # noqa: PLC0415
 
     head = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_current_head()
-    assert rev == head == "0003_position_elapsed"
+    assert rev == head == "0004_trip_legs"
 
 
 async def test_spatial_and_time_indexes(engine: AsyncEngine) -> None:

@@ -22,12 +22,12 @@ from divert.services.eta import EtaEstimate, EtaQuery, KinematicEtaModel, conges
 from divert.services.outbox import OutboxRelay
 from divert.store import redis_store as keys
 from divert.store.redis_store import create_redis
-from divert.worker import Worker
 from tests.integration.helpers import (
     Clock,
     StubRouter,
     api,
     drain_persister,
+    new_worker,
     scalar,
     signal_near_center,
 )
@@ -176,7 +176,7 @@ async def test_rebuild_after_a_no_leader_freeze_keeps_simulated_travel_time(
     )
     dt_sim = cfg.sim_tick_s * cfg.sim_time_scale  # 5 s per tick
     clock = Clock()
-    w1 = Worker(cfg, redis, sessionmaker, instance_id="w-old", wall_clock=clock)
+    w1 = new_worker(cfg, redis, sessionmaker, clock, "w-old")
     persister = Persister(cfg, redis, sessionmaker, instance_id="p-freeze")
     await persister.setup()
     where = signal_near_center("kolkata")
@@ -210,7 +210,7 @@ async def test_rebuild_after_a_no_leader_freeze_keeps_simulated_travel_time(
     async for k in redis.scan_iter(match="divert:{kolkata}:*"):
         await redis.delete(k)
     await redis.delete(keys.LEADER_LOCK)
-    w2 = Worker(cfg, redis, sessionmaker, instance_id="w-new", wall_clock=clock)
+    w2 = new_worker(cfg, redis, sessionmaker, clock, "w-new")
     assert await w2.try_lead()
     assert w2.engine is not None
     v = w2.engine.vehicles["kolkata"][vid]

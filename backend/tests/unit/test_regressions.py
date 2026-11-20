@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -40,6 +41,24 @@ from tests.unit.conftest import (
     live_vehicles,
     unit_settings,
 )
+
+
+async def assert_no_junction_held(redis: Redis) -> None:
+    """Every claim is gone: a released junction is at most RECOVERING, with no claimant."""
+    for sig in (await active_signals(redis)).values():
+        assert sig["state"] == "RECOVERING", sig
+        assert sig["claimants"] == []
+
+
+async def recover(w: UnitWorker, clock: Clock, redis: Redis) -> None:
+    """Run until every recovering junction is back to its plan (NORMAL = not stored)."""
+    for _ in range(200):
+        if not await active_signals(redis):
+            return
+        clock.advance(0.5)
+        await w.tick_once()
+    raise AssertionError("junctions never left RECOVERING")
+
 
 # ----------------------------------------------------------------- guarantee 1
 
@@ -140,10 +159,12 @@ async def test_arrival_next_to_a_signal_releases_every_claim(
     assert vehicle["pos"] == pytest.approx([route.destination.lat, route.destination.lng])
     assert vehicle["claims"] == []
     assert await claim_keys(fake_redis) == []
-    assert await active_signals(fake_redis) == {}
+    await assert_no_junction_held(fake_redis)
     released = [e for e in await history(fake_redis) if e["type"] == "preemption_released"]
     assert {e["signal_id"] for e in released} == {"S5", "S15", "SEND"}
     assert {e["reason"] for e in released if e["signal_id"] == "SEND"} == {"arrived"}
+    assert {e["outcome"] for e in released} == {"CLEARED"}
+    await recover(w, clock, fake_redis)
 
 
 class FailingEta(KinematicEtaModel):
@@ -177,8 +198,9 @@ async def test_exception_mid_route_releases_every_claim(
         held.append(len(await claim_keys(fake_redis)))
     assert max(held) > 0  # it held signals before the crash
     assert await claim_keys(fake_redis) == []
-    assert await active_signals(fake_redis) == {}
+    await assert_no_junction_held(fake_redis)
     assert await live_vehicles(fake_redis) == {}
+    await recover(w, clock, fake_redis)
     failed = [e for e in await history(fake_redis) if e["type"] == "failed"]
     assert len(failed) == 1
     assert failed[0]["dispatch_id"] == cmd["dispatch_id"]
@@ -213,12 +235,27 @@ async def test_cancel_releases_every_claim(
     await w.process_commands()
     clock.advance(0.5)
     await w.tick_once()
+    # every claim is released at once; the unit is recalled and drives back (design §1)
     assert await claim_keys(fake_redis) == []
-    assert await active_signals(fake_redis) == {}
+    await assert_no_junction_held(fake_redis)
+    live = (await live_vehicles(fake_redis))["AMB-1"]
+    assert (live["phase"], live["cancelled"], live["claims"]) == ("RETURNING", True, [])
+    assert not live["leg"]["emergency"]
+    await w.run_until(clock, lambda: "AMB-1" not in w.engine.vehicles.get("delhi", {}))  # type: ignore[union-attr]
+    assert await claim_keys(fake_redis) == []  # the RETURN leg never claims
     assert await live_vehicles(fake_redis) == {}
-    types = [e["type"] for e in await history(fake_redis)]
+    events = await history(fake_redis)
+    assert [e["type"] for e in events if e["type"] in ("returning", "back_in_service")] == [
+        "returning",
+        "back_in_service",
+    ]
+    types = [e["type"] for e in events]
     assert types.count("cancelled") == 1
     assert "arrived" not in types
+    released = [e for e in events if e["type"] == "preemption_released"]
+    assert released
+    assert {e["outcome"] for e in released} == {"CANCELLED"}
+    await recover(w, clock, fake_redis)
     # every command was acked in the same transaction as its effects
     pending = await fake_redis.xpending(keys.STREAM_COMMANDS, keys.GROUP_WORKER)
     assert pending["pending"] == 0
@@ -262,10 +299,12 @@ async def _run_and_sample(
     for cmd in cmds:
         await w.send(cmd)
     samples: list[dict[str, Any]] = []
-    for _ in range(4000):
+    for _ in range(8000):
         clock.advance(0.5)
+        await w.lock.renew()
         await w.process_commands()
         await w.tick_once()
+        await asyncio.sleep(0)
         samples.append(
             {
                 "vehicles": await live_vehicles(fake_redis),
@@ -291,7 +330,8 @@ async def test_concurrent_dispatches_never_lose_updates(
     samples = await _run_and_sample(w, fake_redis, clock, cmds)
     assert not samples[-1]["vehicles"], "everyone arrived and cleared"
 
-    progress: dict[str, float] = {}
+    # monotonic per (vehicle, leg): each leg starts again at along_m 0 (RESPONSE, RETURN)
+    progress: dict[str, tuple[int, float]] = {}
     ended: set[str] = set()
     for s in samples:
         for vid in progress:
@@ -299,8 +339,12 @@ async def test_concurrent_dispatches_never_lose_updates(
                 ended.add(vid)
         for vid, v in s["vehicles"].items():
             assert vid not in ended, f"{vid} came back after it was removed"
-            assert v["along_m"] >= progress.get(vid, 0.0), f"{vid} moved backwards"
-            progress[vid] = v["along_m"]
+            seq = int(v["leg"]["seq"])
+            last_seq, last_along = progress.get(vid, (0, 0.0))
+            assert seq >= last_seq, f"{vid} went back to an earlier leg"
+            if seq == last_seq:
+                assert v["along_m"] >= last_along, f"{vid} moved backwards"
+            progress[vid] = (seq, v["along_m"])
         # every claim field belongs to a vehicle that lists it (per-vehicle ownership)
         for key, holders in s["claims"].items():
             sig = key.rsplit(":", 1)[1]
@@ -316,11 +360,18 @@ async def test_concurrent_dispatches_never_lose_updates(
         for s in samples
     ), "the two ambulances never held J at the same time"
     assert await claim_keys(fake_redis) == []
-    assert await active_signals(fake_redis) == {}
+    await assert_no_junction_held(fake_redis)
     events = await history(fake_redis)
     ids = [e["event_id"] for e in events]
     assert len(ids) == len(set(ids)), "history event ids are unique"
+    # FIRE / CRIME resolve when the scene is cleared, MEDICAL at the hospital handover
     assert sorted(e["vehicle_id"] for e in events if e["type"] == "cleared") == [
+        "FIRE-1", "PCR-1",
+    ]  # fmt: skip
+    assert sorted(e["vehicle_id"] for e in events if e["type"] == "handover_complete") == [
+        "AMB-1", "AMB-2",
+    ]  # fmt: skip
+    assert sorted(e["vehicle_id"] for e in events if e["type"] == "back_in_service") == [
         "AMB-1", "AMB-2", "FIRE-1", "PCR-1",
     ]  # fmt: skip
 
@@ -339,8 +390,9 @@ async def test_leaving_vehicle_keeps_junction_preempted_for_same_type_vehicle(
     assert handover, "AMB-1 never released J while AMB-2 still held it"
     for s in handover:
         sig = s["signals"]["J"]
-        assert sig["state"] == "PREEMPTED"
+        assert sig["state"] == "PREEMPTED"  # same approach: compatible, never QUEUED
         assert sig["vehicle_id"] == "AMB-2"
+        assert [c["vehicle_id"] for c in sig["claimants"]] == ["AMB-2"]
 
 
 async def test_one_multi_exec_per_city_per_tick_and_no_reads(

@@ -68,6 +68,7 @@ async def test_only_one_leader_and_standby_takes_over_from_redis_state(
 
     while (await live_vehicles(fake_redis)).get("AMB-1", {}).get("status") != "ON_SCENE":
         clock.advance(0.5)
+        await w2.lock.renew()  # wall time passes while the machine is loaded
         await w2.tick_once()
     events = await history(fake_redis)
     assert [e["type"] for e in events].count("en_route") == 1  # not replayed on take-over

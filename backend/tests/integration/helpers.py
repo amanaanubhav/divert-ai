@@ -3,6 +3,7 @@ pipeline driver that runs worker ticks + persister rounds against real PG + Redi
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,9 @@ class StubRouter:
             raise RoutingError("stub OSRM is down", kind="unavailable")
         return route_through([origin, destination], step_m=25.0, speed=12.0)
 
+    async def alternatives(self, origin: LatLng, destination: LatLng) -> list[Route]:
+        return [await self.route(origin, destination)]
+
 
 def signal_near_center(city_id: str) -> LatLng:
     """A real junction (from the committed OSM snapshot) close to the city centre."""
@@ -64,6 +68,43 @@ async def api(
         ) as client,
     ):
         yield app, client
+
+
+def new_worker(
+    settings: Settings,
+    redis: Redis,
+    sm: async_sessionmaker[AsyncSession],
+    clock: Clock,
+    name: str,
+    *,
+    router: Any = None,
+) -> Worker:
+    """The real worker; its LegPlanner routes TRANSPORT / RETURN legs with ``router``
+    (default: :class:`StubRouter`) against the real PostGIS (hospitals, corridors)."""
+    return Worker(
+        settings, redis, sm, instance_id=name, wall_clock=clock, router=router or StubRouter()
+    )
+
+
+@asynccontextmanager
+async def not_an_ed(sm: async_sessionmaker[AsyncSession], station_id: str) -> AsyncIterator[None]:
+    """Temporarily tag a hospital ``emergency=no`` (not eligible for TRANSPORT), so a unit
+    based there takes its patient elsewhere and drives a real RETURN leg. Restored after."""
+    async with sm() as s, s.begin():
+        before = await s.scalar(
+            sa.text("SELECT emergency FROM stations WHERE id = :s"), {"s": station_id}
+        )
+        await s.execute(
+            sa.text("UPDATE stations SET emergency = 'no' WHERE id = :s"), {"s": station_id}
+        )
+    try:
+        yield
+    finally:
+        async with sm() as s, s.begin():
+            await s.execute(
+                sa.text("UPDATE stations SET emergency = :e WHERE id = :s"),
+                {"s": station_id, "e": before},
+            )
 
 
 class Clock:
@@ -104,6 +145,7 @@ async def run_pipeline(
         await worker.lock.renew()
         await worker.process_commands()
         await worker.tick_once()
+        await asyncio.sleep(0)  # the LegPlanner's tasks run on this loop
         ticks += 1
         if ticks % persist_every == 0:
             await drain_persister(persister)

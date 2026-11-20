@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from divert.domain.enums import ServiceType
+from divert.domain.enums import RoadClass, ServiceType
+from divert.domain.route import Route
 from divert.services.eta import EtaQuery, KinematicEtaModel, congestion_at
 from divert.services.preemption import PreemptionRules
 from divert.services.simulation import VehicleStatus
@@ -22,6 +23,7 @@ from divert.services.speed_model import (
     build_profile,
     segment_cap_mps,
 )
+from divert.services.traffic import class_factor
 from tests.support import Clock, city, corridor_at, engine, start_cmd, straight_route
 
 
@@ -47,6 +49,11 @@ def test_vehicle_profiles_match_the_spec() -> None:
 )
 def test_segment_cap(osrm: float, congestion: float, service: ServiceType, expected: float) -> None:
     assert segment_cap_mps(osrm, congestion, PROFILES[service]) == pytest.approx(expected)
+
+
+def test_non_emergency_legs_get_no_emergency_advantage() -> None:
+    prof = PROFILES[ServiceType.AMBULANCE]
+    assert segment_cap_mps(10.0, 0.5, prof, emergency=False) == pytest.approx(5.0)
 
 
 def test_constant_cap_time_matches_closed_form() -> None:
@@ -103,7 +110,28 @@ def test_signal_at_the_destination_is_not_claimed_early() -> None:
     )
     _, at = sp.time_from(1922.5, 15.0, [8873.0])
     assert at[0] > 300.0
-    assert not PreemptionRules().should_claim(1922.5, 8873.0, at[0])
+    rules = PreemptionRules()
+    assert not rules.should_claim(
+        eta_s=at[0], distance_ahead_m=8873.0 - 1922.5, speed_mps=15.0, required_lead_s=40.0
+    )
+    # it is claimed near the end: the leg ends past the junction's stop line
+    assert rules.must_cross(8873.0, None, 8872.68)
+
+
+def test_eta_uses_the_class_aware_factor_of_each_segment() -> None:
+    delhi = city("delhi")
+    peak = datetime(2026, 11, 17, 12, 30, tzinfo=UTC)  # 18:00 IST
+    f = congestion_at(delhi, peak)
+    arterial = straight_route(delhi.center, n=40, step_m=50.0, speed=15.0)  # 54 km/h
+    local = straight_route(delhi.center, n=40, step_m=50.0, speed=8.0)  # 29 km/h
+    model = KinematicEtaModel()
+
+    def cruise_cap(route: Route) -> float:
+        q = EtaQuery(route, ServiceType.POLICE, delhi, [], 0.0, 0.0, peak)
+        return model.profile_for(q).allowed_speed(1000.0)
+
+    assert cruise_cap(arterial) == pytest.approx(15.0 * f * EMERGENCY_ADVANTAGE)
+    assert cruise_cap(local) == pytest.approx(8.0 * class_factor(f, RoadClass.LOCAL) * 1.3)
 
 
 def test_congestion_uses_city_local_hour() -> None:
@@ -147,7 +175,29 @@ def test_unpreempted_junction_slows_the_vehicle() -> None:
     delhi = city("delhi")
     route = straight_route(delhi.center, n=40, step_m=50.0, speed=14.0)
     junction = route.cumulative[20]
-    fast = build_profile(route, ServiceType.AMBULANCE, 1.0, [(junction, True)])
-    slow = build_profile(route, ServiceType.AMBULANCE, 1.0, [(junction, False)])
+    fast = build_profile(route, ServiceType.AMBULANCE, 1.0, [(junction, JUNCTION_PREEMPTED_MPS)])
+    slow = build_profile(route, ServiceType.AMBULANCE, 1.0, [(junction, JUNCTION_NORMAL_MPS)])
     assert slow.allowed_speed(junction) < fast.allowed_speed(junction)
     assert slow.time_from(0.0, 0.0)[0] > fast.time_from(0.0, 0.0)[0]
+
+
+def test_stop_line_and_speed_advisory_in_the_motion() -> None:
+    delhi = city("delhi")
+    route = straight_route(delhi.center, n=40, step_m=50.0, speed=14.0)
+    stop = route.cumulative[20]
+    prof = build_profile(route, ServiceType.AMBULANCE, 1.0, [(stop, 0.0)])
+    assert prof.allowed_speed(stop) == 0.0
+    x, v = 0.0, 0.0
+    for _ in range(400):
+        x, v = prof.step(x, v, 0.5)
+        if x >= stop - 0.3:
+            break
+    assert v < 2.5  # it braked into the stop line (the engine snaps the last 0.3 m)
+    # the advisory caps the speed, approached at no more than the braking rate
+    free = build_profile(route, ServiceType.AMBULANCE, 1.0, [])
+    x, v = 100.0, 15.0
+    x, v = free.step(x, v, 0.5, cap_mps=5.0)
+    assert v == pytest.approx(15.0 - 3.0 * 0.5)
+    for _ in range(10):
+        x, v = free.step(x, v, 0.5, cap_mps=5.0)
+    assert v == pytest.approx(5.0)

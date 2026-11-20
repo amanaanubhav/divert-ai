@@ -25,6 +25,8 @@ from tests.integration.helpers import (
     Clock,
     api,
     drain_persister,
+    new_worker,
+    not_an_ed,
     rows,
     scalar,
     signal_near_center,
@@ -36,6 +38,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("clean_db")]
 def _settings(base: Settings, **kw: Any) -> Settings:
     defaults: dict[str, Any] = {
         "scene_time_s": 20.0,
+        "hospital_handover_s": 20.0,
         "leader_lock_ttl_ms": 60_000,
         "persister_retry_idle_ms": 100,
         "persister_max_retries": 2,
@@ -52,12 +55,57 @@ async def _dispatch(client: Any, city: str, type_: str) -> dict[str, Any]:
     return dict(r.json())
 
 
+async def _pg_status(sm: async_sessionmaker[AsyncSession], did: str) -> tuple[str, str, str | None]:
+    r = (
+        await rows(
+            sm,
+            "SELECT d.status, u.status AS unit_status, u.current_dispatch_id "
+            "FROM dispatches d JOIN units u ON u.id = d.unit_id WHERE d.id = :d",
+            d=did,
+        )
+    )[0]
+    current = None if r.current_dispatch_id is None else str(r.current_dispatch_id)
+    return str(r.status), str(r.unit_status), current
+
+
+async def drive_until_back(
+    worker: Worker,
+    persister: Persister,
+    clock: Clock,
+    sm: async_sessionmaker[AsyncSession],
+    did: str,
+    *,
+    max_ticks: int = 40_000,
+) -> list[str]:
+    """Drive commands + ticks + persister until the dispatch is COMPLETED in PG; returns
+    every unit status seen meanwhile (the unit must stay busy until the very end)."""
+    seen: list[str] = []
+    ticks = 0
+    while True:
+        status, unit_status, current = await _pg_status(sm, did)
+        if status in ("COMPLETED", "FAILED"):
+            return seen
+        assert current == did, f"unit freed before the trip ended ({status}, {unit_status})"
+        seen.append(unit_status)
+        for _ in range(50):
+            clock.advance(0.5)
+            await worker.lock.renew()
+            await worker.process_commands()
+            await worker.tick_once()
+            await asyncio.sleep(0)  # the LegPlanner's tasks run on this loop
+            ticks += 1
+        await drain_persister(persister)
+        assert ticks < max_ticks, f"trip did not end (dispatch {status})"
+
+
 async def test_full_lifecycle_is_persisted(
     test_settings: Settings, redis: Redis, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
+    """MEDICAL: RESPONSE -> scene -> TRANSPORT to a hospital -> handover -> RETURN -> back in
+    service; every leg, the hospital and the pre-emptions persisted, unit freed at the end."""
     cfg = _settings(test_settings)
     clock = Clock()
-    worker = Worker(cfg, redis, sessionmaker, instance_id="w-e2e", wall_clock=clock)
+    worker = new_worker(cfg, redis, sessionmaker, clock, "w-e2e")
     persister = Persister(cfg, redis, sessionmaker, instance_id="p-e2e")
     await persister.setup()
     async with api(cfg, redis) as (_, client):
@@ -65,29 +113,29 @@ async def test_full_lifecycle_is_persisted(
         clock.now = datetime.now(UTC)  # simulated time starts after the dispatch
         assert await worker.try_lead()
         iid, did = created["incident"]["id"], created["vehicle"]["dispatch_id"]
-
-        async def status() -> str:
-            return str(
-                await scalar(sessionmaker, "SELECT status FROM incidents WHERE id = :i", i=iid)
-            )
-
-        ticks = 0
-        while await status() != "RESOLVED":  # drive simulated time until PG says RESOLVED
-            for _ in range(50):
-                clock.advance(0.5)
-                await worker.process_commands()
-                await worker.tick_once()
-                ticks += 1
-            await drain_persister(persister)
-            assert ticks < 20_000
+        # its own hospital is not an ED: the patient goes elsewhere, then a real RETURN leg
+        async with not_an_ed(sessionmaker, created["vehicle"]["station"]["id"]):
+            seen = await drive_until_back(worker, persister, clock, sessionmaker, did)
+        assert set(seen) <= {"DISPATCHED", "ON_SCENE", "TRANSPORTING", "AT_HOSPITAL", "RETURNING"}
+        assert "TRANSPORTING" in seen or "AT_HOSPITAL" in seen
 
         inc = (await rows(sessionmaker, "SELECT * FROM incidents WHERE id = :i", i=iid))[0]
-        assert inc.en_route_at
-        assert inc.on_scene_at
-        assert inc.resolved_at
-        assert inc.dispatched_at <= inc.en_route_at <= inc.on_scene_at <= inc.resolved_at
+        assert inc.status == "RESOLVED"
+        assert inc.dispatched_at <= inc.en_route_at <= inc.on_scene_at
+        assert inc.on_scene_at <= inc.transport_started_at <= inc.at_hospital_at
+        assert inc.at_hospital_at <= inc.resolved_at
+        hospital = (
+            await rows(
+                sessionmaker,
+                "SELECT id, service, emergency, healthcare FROM stations WHERE id = :h",
+                h=inc.hospital_station_id,
+            )
+        )[0]
+        assert hospital.service == "AMBULANCE"
+        assert hospital.emergency != "no"
+        assert hospital.healthcare not in ("dentist", "blood_bank", "alternative", "doctor")
         d = (await rows(sessionmaker, "SELECT * FROM dispatches WHERE id = :d", d=did))[0]
-        assert d.end_reason == "CLEARED"
+        assert (d.status, d.end_reason) == ("COMPLETED", "CLEARED")
         assert d.actual_travel_s == pytest.approx(d.predicted_eta_s, rel=0.10)
         assert d.est_time_saved_s is not None
         unit = (
@@ -98,15 +146,45 @@ async def test_full_lifecycle_is_persisted(
             )
         )[0]
         assert (unit.status, unit.current_dispatch_id) == ("AVAILABLE", None)
+
+        legs = await rows(
+            sessionmaker,
+            "SELECT seq, kind, emergency, destination_kind, destination_station_id, "
+            "predicted_eta_s, actual_travel_s, end_reason, route_choice, hospital_choice, "
+            "ST_Distance(origin, LAG(destination) OVER (ORDER BY seq)) AS gap_m "
+            "FROM dispatch_legs WHERE dispatch_id = :d ORDER BY seq",
+            d=did,
+        )
+        assert [(lg.seq, lg.kind, lg.emergency) for lg in legs] == [
+            (0, "RESPONSE", True), (1, "TRANSPORT", True), (2, "RETURN", False),
+        ]  # fmt: skip
+        assert [lg.end_reason for lg in legs] == ["ARRIVED"] * 3
+        assert [lg.destination_kind for lg in legs] == ["SCENE", "HOSPITAL", "STATION"]
+        assert legs[1].destination_station_id == inc.hospital_station_id
+        assert legs[2].destination_station_id == d.station_id
+        assert all(lg.gap_m < 1.0 for lg in legs[1:]), "a leg starts where the last one ended"
+        assert legs[1].hospital_choice["chosen"] == inc.hospital_station_id
+        assert all(lg.route_choice for lg in legs)
+        for lg in legs:  # the +-10 % predicted-vs-actual guarantee, on every leg kind
+            assert lg.actual_travel_s == pytest.approx(lg.predicted_eta_s, rel=0.10), lg.kind
+
         pre = await rows(
             sessionmaker, "SELECT * FROM signal_preemptions WHERE dispatch_id = :d", d=did
         )
         assert pre, "the junction at the scene was pre-empted"
-        assert all(p.released_at is not None for p in pre)
+        assert all(p.released_at is not None and p.outcome for p in pre)
+        assert {p.leg_seq for p in pre} <= {0, 1}, "the RETURN leg never claims"
+        assert all(p.movement and p.lane and p.lanes_total for p in pre)
         n_pos = await scalar(
             sessionmaker, "SELECT count(*) FROM vehicle_positions WHERE dispatch_id = :d", d=did
         )
         assert n_pos >= int(d.actual_travel_s // cfg.position_sample_s)
+        pos_legs = await rows(
+            sessionmaker,
+            "SELECT DISTINCT leg_seq FROM vehicle_positions WHERE dispatch_id = :d ORDER BY 1",
+            d=did,
+        )
+        assert [r.leg_seq for r in pos_legs] == [0, 1, 2]
         timeline = [
             r.type
             for r in await rows(
@@ -116,12 +194,26 @@ async def test_full_lifecycle_is_persisted(
             )
         ]
         assert timeline[:3] == ["reported", "dispatched", "en_route"]
-        assert timeline.index("arrived") < timeline.index("cleared")
+        order = [
+            "arrived", "transport_started", "arrived_hospital", "handover_complete",
+            "returning", "back_in_service",
+        ]  # fmt: skip
+        assert [timeline.index(t) for t in order] == sorted(timeline.index(t) for t in order)
+        assert "cleared" not in timeline  # MEDICAL resolves at the handover
+        assert timeline.count("leg_started") == 2  # TRANSPORT + RETURN (RESPONSE = en_route)
+        assert timeline.count("leg_ended") == 3
 
         # read APIs over the history
         detail = (await client.get(f"/api/v1/incidents/{iid}")).json()
         assert detail["status"] == "RESOLVED"
         assert detail["dispatches"][0]["route"][0] == pytest.approx(created["vehicle"]["route"][0])
+        assert detail["dispatches"][0]["status"] == "COMPLETED"
+        assert [lg["kind"] for lg in detail["legs"]] == ["RESPONSE", "TRANSPORT", "RETURN"]
+        assert all(lg["route_choice"] for lg in detail["legs"])
+        assert all(abs(lg["eta_error_pct"]) <= 10.0 for lg in detail["legs"])
+        assert detail["hospital"]["id"] == inc.hospital_station_id
+        assert detail["transport_started_at"]
+        assert detail["at_hospital_at"]
         assert len(detail["preemptions"]) == len(pre)
         assert [e["type"] for e in detail["timeline"]] == timeline
         track = (
@@ -137,18 +229,26 @@ async def test_full_lifecycle_is_persisted(
         assert rt["p50_s"] == pytest.approx(d.actual_travel_s, abs=5.0)
         assert summary["preemptions"]["total"] == len(pre)
         assert summary["est_time_saved_s"]["total"] == pytest.approx(d.est_time_saved_s)
+        assert summary["transport_time_s"]["count"] == 1
+        assert summary["call_to_hospital_s"]["count"] == 1
+        assert summary["handover_to_back_in_service_s"]["count"] == 1
+        assert summary["hospitals"][0]["station_id"] == inc.hospital_station_id
+        assert {k: v["count"] for k, v in summary["legs"].items()} == {
+            "RESPONSE": 1, "TRANSPORT": 1, "RETURN": 1,
+        }  # fmt: skip
+        assert summary["dispatches"]["by_status"]["COMPLETED"] == 1
 
         # replaying every history event changes nothing (idempotent persister)
         before = await rows(
             sessionmaker,
-            "SELECT (SELECT count(*) FROM incident_events), (SELECT count(*) FROM signal_preemptions), (SELECT count(*) FROM vehicle_positions)",
+            "SELECT (SELECT count(*) FROM incident_events), (SELECT count(*) FROM signal_preemptions), (SELECT count(*) FROM vehicle_positions), (SELECT count(*) FROM dispatch_legs)",
         )
         for _, fields in await redis.xrange(keys.STREAM_HISTORY):
             await redis.xadd(keys.STREAM_HISTORY, {FIELD: fields[FIELD]})
         await drain_persister(persister)
         after = await rows(
             sessionmaker,
-            "SELECT (SELECT count(*) FROM incident_events), (SELECT count(*) FROM signal_preemptions), (SELECT count(*) FROM vehicle_positions)",
+            "SELECT (SELECT count(*) FROM incident_events), (SELECT count(*) FROM signal_preemptions), (SELECT count(*) FROM vehicle_positions), (SELECT count(*) FROM dispatch_legs)",
         )
         assert before == after
         assert await redis.xlen(keys.STREAM_HISTORY_DLQ) == 0
@@ -157,38 +257,61 @@ async def test_full_lifecycle_is_persisted(
 async def test_cancel_frees_the_unit_after_the_worker_confirms(
     test_settings: Settings, redis: Redis, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
+    """Cancel en route: claims released, the vehicle brakes to a stop and drives back from
+    there (never teleports); the unit is freed only when that RETURN leg ends."""
     cfg = _settings(test_settings)
     clock = Clock()
-    worker = Worker(cfg, redis, sessionmaker, instance_id="w-cxl", wall_clock=clock)
+    worker = new_worker(cfg, redis, sessionmaker, clock, "w-cxl")
     persister = Persister(cfg, redis, sessionmaker, instance_id="p-cxl")
     await persister.setup()
     async with api(cfg, redis) as (_, client):
         created = await _dispatch(client, "bengaluru", "CRIME")
+        did = created["vehicle"]["dispatch_id"]
         assert await worker.try_lead()
         for _ in range(10):
             clock.advance(0.5)
             await worker.process_commands()
             await worker.tick_once()
+        live = {v["id"]: v for v in await read_vehicles(redis, "bengaluru")}
+        at_cancel = live[created["vehicle"]["id"]]
+        assert at_cancel["speed_mps"] > 0
         r = await client.delete(f"/api/v1/cities/bengaluru/incidents/{created['incident']['id']}")
         assert r.status_code == 200
-        for _ in range(3):
-            clock.advance(0.5)
-            await worker.process_commands()
-            await worker.tick_once()
-        await drain_persister(persister)
+        assert r.json()["incident"]["status"] == "CANCELLED"
+        again = await client.delete(
+            f"/api/v1/cities/bengaluru/incidents/{created['incident']['id']}"
+        )
+        assert again.status_code == 200  # idempotent
+        await drive_until_back(worker, persister, clock, sessionmaker, did)
     unit_id = created["vehicle"]["id"]
     assert (
         await scalar(sessionmaker, "SELECT status FROM units WHERE id = :u", u=unit_id)
         == "AVAILABLE"
     )
     d = (
-        await rows(
-            sessionmaker,
-            "SELECT ended_at, end_reason FROM dispatches WHERE id = :d",
-            d=created["vehicle"]["dispatch_id"],
-        )
+        await rows(sessionmaker, "SELECT status, end_reason FROM dispatches WHERE id = :d", d=did)
     )[0]
-    assert d.end_reason == "CANCELLED"
+    assert (d.status, d.end_reason) == ("COMPLETED", "CANCELLED")
+    legs = await rows(
+        sessionmaker,
+        "SELECT seq, kind, end_reason, emergency, actual_travel_s, predicted_eta_s, "
+        "ST_Distance(origin, ST_GeogFromText(:p)) AS from_cancel_m "
+        "FROM dispatch_legs WHERE dispatch_id = :d ORDER BY seq",
+        d=did,
+        p=f"SRID=4326;POINT({at_cancel['pos'][1]} {at_cancel['pos'][0]})",
+    )
+    assert [(lg.seq, lg.kind, lg.end_reason) for lg in legs] == [
+        (0, "RESPONSE", "CANCELLED"), (1, "RETURN", "ARRIVED"),
+    ]  # fmt: skip
+    assert not legs[1].emergency
+    # the RETURN starts where the vehicle braked to a stop: a few metres on, not the station
+    assert legs[1].from_cancel_m < 60.0
+    assert legs[1].actual_travel_s == pytest.approx(legs[1].predicted_eta_s, rel=0.10)
+    pre = await rows(
+        sessionmaker, "SELECT outcome, released_at FROM signal_preemptions WHERE dispatch_id = :d",
+        d=did,
+    )  # fmt: skip
+    assert all(p.released_at is not None for p in pre)
     assert await read_vehicles(redis, "bengaluru") == []
     assert (
         await scalar(
@@ -326,7 +449,7 @@ async def test_new_leader_rebuilds_from_postgres_when_redis_lost_live_state(
 ) -> None:
     cfg = _settings(test_settings)
     clock = Clock()
-    w1 = Worker(cfg, redis, sessionmaker, instance_id="w-old", wall_clock=clock)
+    w1 = new_worker(cfg, redis, sessionmaker, clock, "w-old")
     persister = Persister(cfg, redis, sessionmaker, instance_id="p-rb")
     await persister.setup()
     async with api(cfg, redis) as (_, client):
@@ -349,31 +472,20 @@ async def test_new_leader_rebuilds_from_postgres_when_redis_lost_live_state(
     async for k in redis.scan_iter(match="divert:{kolkata}:*"):
         await redis.delete(k)
     await redis.delete(keys.LEADER_LOCK)
-    w2 = Worker(cfg, redis, sessionmaker, instance_id="w-new", wall_clock=clock)
+    w2 = new_worker(cfg, redis, sessionmaker, clock, "w-new")
     assert await w2.try_lead()
     assert w2.engine is not None
     v = w2.engine.vehicles["kolkata"][created["vehicle"]["id"]]
     assert v.dispatch_id == did
     assert v.along_m == pytest.approx(last_along, abs=0.01)  # resumed where PG last saw it
 
-    async def resolved() -> bool:
-        return (
-            await scalar(
-                sessionmaker,
-                "SELECT status FROM incidents WHERE id = :i",
-                i=created["incident"]["id"],
-            )
-            == "RESOLVED"
+    await drive_until_back(w2, persister, clock, sessionmaker, did)
+    assert (
+        await scalar(
+            sessionmaker, "SELECT status FROM incidents WHERE id = :i", i=created["incident"]["id"]
         )
-
-    for _ in range(400):
-        if await resolved():
-            break
-        for _ in range(25):
-            clock.advance(0.5)
-            await w2.tick_once()
-        await drain_persister(persister)
-    assert await resolved()
+        == "RESOLVED"
+    )
     assert (
         await scalar(
             sessionmaker, "SELECT status FROM units WHERE id = :u", u=created["vehicle"]["id"]

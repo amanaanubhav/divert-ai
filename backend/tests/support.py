@@ -97,12 +97,22 @@ def start_cmd(
     }
 
 
-def engine(*cities: str, scene_time_s: float = 120.0, eta_model: Any = None) -> SimulationEngine:
+def engine(
+    *cities: str,
+    scene_time_s: float = 120.0,
+    eta_model: Any = None,
+    hospital_handover_s: float = 30.0,
+) -> SimulationEngine:
     ids = cities or ("delhi",)
     return SimulationEngine(
         {c: city(c) for c in ids},
         eta_model or KinematicEtaModel(),
-        SimConfig(scene_time_s=scene_time_s, position_sample_s=5.0, rules=PreemptionRules()),
+        SimConfig(
+            scene_time_s=scene_time_s,
+            position_sample_s=5.0,
+            rules=PreemptionRules(),
+            hospital_handover_s=hospital_handover_s,
+        ),
     )
 
 
@@ -115,3 +125,80 @@ class Clock:
     def advance(self, seconds: float) -> datetime:
         self.now += timedelta(seconds=seconds)
         return self.now
+
+
+# ------------------------------------------------------------------ trip legs (stubs)
+
+STUB_HOSPITAL_OFFSET_M = 800.0  # a stub TRANSPORT leg ends this far north of the scene
+
+
+def stub_leg_command(
+    req: dict[str, Any], *, speed: float = 12.0, corridor_every: int | None = None
+) -> dict[str, Any]:
+    """A ``leg_planned`` command answering a ``plan_request`` with a straight stub route
+    (unit tests only: no OSRM, no PostgreSQL). TRANSPORT ends 800 m north of the scene at
+    a stub hospital, RETURN at the unit's home position from the request.
+    ``corridor_every``: a stub junction every that many route points (25 m apart)."""
+    from divert.domain.enums import DestinationKind, LegKind  # noqa: PLC0415
+    from divert.services.legs import destination_json, leg_planned_command  # noqa: PLC0415
+
+    origin = LatLng(*req["origin"])
+    kind = LegKind(req["kind"])
+    if kind is LegKind.TRANSPORT:
+        dest = destination_point(origin, 0.0, STUB_HOSPITAL_OFFSET_M)
+        destination = destination_json(DestinationKind.HOSPITAL, dest, "H-stub", "Stub Hospital")
+        hospital: dict[str, Any] | None = {
+            "id": "H-stub",
+            "name": "Stub Hospital",
+            "location": [dest.lat, dest.lng],
+            "emergency": "yes",
+        }
+    else:
+        dest = LatLng(*req["home"])
+        destination = destination_json(
+            DestinationKind.STATION, dest, req.get("station_id"), "Home station"
+        )
+        hospital = None
+    route = route_through([origin, dest], step_m=25.0, speed=speed)
+    corridor = (
+        corridor_at(
+            route,
+            range(corridor_every, len(route.points) - 1, corridor_every),
+            prefix=f"{kind.value[0]}{req['seq']}-",
+        )
+        if corridor_every
+        else ()
+    )
+    return leg_planned_command(
+        city_id=req["city"],
+        dispatch_id=req["dispatch_id"],
+        incident_id=req["incident_id"],
+        vehicle_id=req["vehicle_id"],
+        seq=int(req["seq"]),
+        kind=kind,
+        route=route,
+        corridor=corridor,
+        destination=destination,
+        predicted_eta_s=0.0,
+        route_choice=None,
+        hospital=hospital,
+        planned_at=T0,
+    )
+
+
+def fulfil_plans(
+    eng: SimulationEngine,
+    batches: dict[str, Any],
+    wall: datetime,
+    *,
+    corridor_every: int | None = None,
+) -> int:
+    """Answer every plan request of these batches at once (engine-level unit tests)."""
+    n = 0
+    for b in batches.values():
+        for req in b.plan_requests:
+            if req.get("type") == "plan_request":
+                cmd = stub_leg_command(req, corridor_every=corridor_every)
+                eng.apply_leg_planned(cmd, stream_id=None, wall=wall)
+                n += 1
+    return n
