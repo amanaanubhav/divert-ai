@@ -127,7 +127,8 @@ describe('HistoryView', () => {
     const dialog = await screen.findByRole('dialog')
     await within(dialog).findByText('PCR-Pw1-1')
     expect(within(dialog).getByText('1:13')).toBeInTheDocument() // predicted
-    expect(within(dialog).getByText('+2.2%')).toBeInTheDocument() // error
+    // error = (actual - predicted) / actual, as the backend's eta_error_pct: 1.6 / 75
+    expect(within(dialog).getByText('+2.1%')).toBeInTheDocument()
     expect(within(dialog).getByText('J6720393130')).toBeInTheDocument()
     expect(within(dialog).getByText('Signal pre-empted')).toBeInTheDocument()
     expect(within(dialog).getByText(/travel 1:15/)).toBeInTheDocument()

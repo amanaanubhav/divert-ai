@@ -1,31 +1,54 @@
 import L from 'leaflet'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { CircleMarker, MapContainer, Polyline, Tooltip, useMap } from 'react-leaflet'
-import type { IncidentDetail, TrackPoint } from '../../api/types'
+import type { IncidentDetail, ServiceType, TrackPoint } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Segmented } from '../../components/ui/Segmented'
-import { formatDuration, formatSpeed } from '../../lib/format'
-import { SERVICE_COLOR, SIGNAL_COLOR } from '../../lib/theme'
-import { useUiStore } from '../../store/ui'
-import { incidentIcon, vehicleIcon } from '../map/icons'
+import { edLabel, formatDuration, formatSpeed, hospitalLabel, LEG_LABEL } from '../../lib/format'
+import { LEG_COLOR, legColor, legDash, SIGNAL_COLOR } from '../../lib/theme'
+import { useUiStore, type RoutePreview } from '../../store/ui'
+import { hospitalIcon, incidentIcon, vehicleIcon } from '../map/icons'
 import { BaseTiles } from '../map/MapHelpers'
-import { frameAt, prepareReplay, type Replay } from './replay'
+import {
+  drawableLegs,
+  frameAt,
+  legKey,
+  legSpans,
+  preemptionAt,
+  prepareReplay,
+  travelledByLeg,
+  type LegSpan,
+  type Replay,
+} from './replay'
 
 const SPEEDS = ['1', '4', '16', '64'] as const
 type Speed = (typeof SPEEDS)[number]
 
-/** Recorded route + positions of an incident, with a play / pause / scrub replay. */
+/** Recorded legs + positions of an incident, with a play / pause / scrub replay across all legs. */
 export function TrackReplay({
   detail,
   points,
+  preview = null,
 }: {
   detail: IncidentDetail
   points: readonly TrackPoint[]
+  /** Route alternatives to draw faintly ("Why this route" hovered). */
+  preview?: readonly RoutePreview[] | null
 }) {
   const dark = useUiStore((s) => s.darkTiles)
+  const legs = useMemo(() => drawableLegs(detail), [detail])
   const replay = useMemo(
-    () => prepareReplay(points, detail.dispatches),
-    [points, detail.dispatches],
+    () => prepareReplay(points, detail.dispatches, legs),
+    [points, detail.dispatches, legs],
+  )
+  const spans = useMemo(() => (replay ? legSpans(replay, legs) : []), [replay, legs])
+  const serviceOf = useMemo(
+    () => new Map(detail.dispatches.map((d) => [d.id, d.service] as const)),
+    [detail.dispatches],
+  )
+  const kindOf = useMemo(
+    () => new Map(legs.map((l) => [legKey(l.dispatch_id, l.seq), l.kind] as const)),
+    [legs],
   )
   const [t, setTState] = useState(0)
   const tRef = useRef(0)
@@ -59,17 +82,17 @@ export function TrackReplay({
 
   const bounds = useMemo(() => {
     const pts: [number, number][] = [detail.location as [number, number]]
-    for (const d of detail.dispatches) for (const p of d.route) pts.push(p as [number, number])
+    for (const l of legs) for (const p of l.route) pts.push(p as [number, number])
     for (const p of points) pts.push(p.pos as [number, number])
+    if (detail.hospital) pts.push(detail.hospital.location as [number, number])
     return L.latLngBounds(pts)
-  }, [detail, points])
+  }, [detail, legs, points])
 
   const frame = replay ? frameAt(replay, t) : null
-  const travelled =
-    replay && frame
-      ? replay.points.slice(0, frame.index + 1).map((p) => p.pos as [number, number])
-      : []
-  if (frame) travelled.push(frame.pos as [number, number])
+  const service: ServiceType =
+    (frame && serviceOf.get(frame.dispatchId)) ?? dispatch?.service ?? 'AMBULANCE'
+  const frameKind = frame ? kindOf.get(legKey(frame.dispatchId, frame.legSeq)) : undefined
+  const travelled = replay && frame ? travelledByLeg(replay, frame) : []
 
   return (
     <div className="space-y-2">
@@ -83,96 +106,163 @@ export function TrackReplay({
         >
           <BaseTiles dark={dark} />
           <FitOnChange bounds={bounds} />
-          {detail.dispatches.map((d) => (
+          {legs.map((l) => (
             <Polyline
-              key={d.id}
-              positions={d.route as [number, number][]}
-              pathOptions={{ color: SERVICE_COLOR[d.service], weight: 4, opacity: 0.35 }}
+              key={legKey(l.dispatch_id, l.seq)}
+              positions={l.route as [number, number][]}
+              pathOptions={{
+                color: legColor(l.kind, serviceOf.get(l.dispatch_id) ?? 'AMBULANCE'),
+                weight: 4,
+                opacity: l.kind === 'RETURN' ? 0.6 : 0.35,
+                ...(legDash(l.kind) ? { dashArray: legDash(l.kind) } : {}),
+              }}
             />
           ))}
-          {(dispatch?.corridor ?? []).map((c) => {
-            const pre = detail.preemptions.find((p) => p.signal_id === c.signal_id)
-            return (
-              <CircleMarker
-                key={c.signal_id}
-                center={c.pos as [number, number]}
-                radius={5}
-                pathOptions={{
-                  color: '#fff',
-                  weight: 1.5,
-                  fillOpacity: 1,
-                  fillColor: pre ? SIGNAL_COLOR[pre.state] : SIGNAL_COLOR.NORMAL,
-                }}
-              >
-                <Tooltip className="divert-tip">
-                  {c.name ?? c.signal_id} · lane {c.lane} ·{' '}
-                  {pre ? pre.state.toLowerCase() : 'not pre-empted'}
-                </Tooltip>
-              </CircleMarker>
-            )
-          })}
-          {travelled.length > 1 && dispatch ? (
+          {(preview ?? []).map((r) => (
             <Polyline
-              positions={travelled}
-              pathOptions={{ color: SERVICE_COLOR[dispatch.service], weight: 4, opacity: 1 }}
+              key={`alt-${r.label}`}
+              positions={r.route as [number, number][]}
+              pathOptions={{
+                color: LEG_COLOR.RETURN,
+                weight: r.emphasis ? 5 : 4,
+                opacity: r.emphasis ? 0.85 : 0.5,
+                dashArray: '2 7',
+                lineCap: 'round',
+              }}
+            >
+              <Tooltip permanent direction="center" className="divert-tip">
+                Route {r.label}
+              </Tooltip>
+            </Polyline>
+          ))}
+          {legs.flatMap((l) =>
+            (l.corridor ?? []).map((c) => {
+              const pre = preemptionAt(detail.preemptions, l.dispatch_id, l.seq, c.signal_id)
+              const freeLeft = c.free_left === true
+              return (
+                <CircleMarker
+                  key={`${legKey(l.dispatch_id, l.seq)}:${c.signal_id}:${c.pass_no ?? 0}`}
+                  center={c.pos as [number, number]}
+                  radius={5}
+                  pathOptions={
+                    freeLeft
+                      ? {
+                          color: SIGNAL_COLOR.PREEMPTED,
+                          weight: 2,
+                          dashArray: '2 2',
+                          fillColor: '#fff',
+                          fillOpacity: 1,
+                        }
+                      : {
+                          color: '#fff',
+                          weight: 1.5,
+                          fillOpacity: 1,
+                          fillColor: pre ? SIGNAL_COLOR[pre.state] : SIGNAL_COLOR.NORMAL,
+                        }
+                  }
+                >
+                  <Tooltip className="divert-tip">
+                    {c.name ?? c.signal_id} · {LEG_LABEL[l.kind].toLowerCase()} leg ·{' '}
+                    {freeLeft
+                      ? 'free left (not claimed)'
+                      : `lane ${c.advice ? `${c.advice.lane_index} of ${c.advice.lanes_total}` : c.lane} · ${
+                          pre
+                            ? pre.state === 'CONFLICT'
+                              ? 'queued'
+                              : 'pre-empted'
+                            : 'not pre-empted'
+                        }`}
+                  </Tooltip>
+                </CircleMarker>
+              )
+            }),
+          )}
+          {travelled.map((seg) => (
+            <Polyline
+              key={`trav-${seg.key}`}
+              positions={seg.pts as [number, number][]}
+              pathOptions={{
+                color: legColor(kindOf.get(seg.key), serviceOf.get(seg.dispatchId) ?? service),
+                weight: 4,
+                opacity: 1,
+                ...(legDash(kindOf.get(seg.key))
+                  ? { dashArray: legDash(kindOf.get(seg.key)) }
+                  : {}),
+              }}
             />
-          ) : null}
+          ))}
           <IncidentPin detail={detail} />
+          <HospitalPin detail={detail} />
           {frame && dispatch ? (
             <ReplayMarker
               replay={replay}
               pos={frame.pos}
               heading={frame.heading}
-              service={dispatch.service}
+              service={service}
               id={dispatch.vehicle_id}
+              patient={frameKind === 'TRANSPORT'}
             />
           ) : null}
         </MapContainer>
       </div>
       {replay && replay.points.length > 1 ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={() => {
-              if (!playing && t >= replay.durationMs) setT(0)
-              setPlaying(!playing)
-            }}
-            aria-label={playing ? 'Pause replay' : 'Play replay'}
-          >
-            {playing ? 'Pause' : 'Play'}
-          </Button>
-          <label htmlFor={sliderId} className="sr-only">
-            Replay position
-          </label>
-          <input
-            id={sliderId}
-            type="range"
-            min={0}
-            max={Math.max(1, Math.round(replay.durationMs))}
-            step={100}
-            value={Math.round(t)}
-            onChange={(e) => {
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => {
+                if (!playing && t >= replay.durationMs) setT(0)
+                setPlaying(!playing)
+              }}
+              aria-label={playing ? 'Pause replay' : 'Play replay'}
+            >
+              {playing ? 'Pause' : 'Play'}
+            </Button>
+            <label htmlFor={sliderId} className="sr-only">
+              Replay position
+            </label>
+            <input
+              id={sliderId}
+              type="range"
+              min={0}
+              max={Math.max(1, Math.round(replay.durationMs))}
+              step={100}
+              value={Math.round(t)}
+              onChange={(e) => {
+                setPlaying(false)
+                setT(Number(e.target.value))
+              }}
+              className="min-w-[8rem] flex-1 accent-primary"
+              aria-valuetext={`${formatDuration(t / 1000)} of ${formatDuration(replay.durationMs / 1000)}`}
+            />
+            <span className="text-xs tabular-nums text-muted">
+              {formatDuration(t / 1000)} / {formatDuration(replay.durationMs / 1000)}
+            </span>
+            <Segmented
+              label="Replay speed"
+              size="sm"
+              value={speed}
+              onChange={setSpeed}
+              options={SPEEDS.map((s) => ({ value: s, label: `${s}×` }))}
+            />
+          </div>
+          <LegBar
+            spans={spans}
+            durationMs={replay.durationMs}
+            service={service}
+            current={frame ? legKey(frame.dispatchId, frame.legSeq) : null}
+            onJump={(ms) => {
               setPlaying(false)
-              setT(Number(e.target.value))
+              setT(ms)
             }}
-            className="min-w-[8rem] flex-1 accent-primary"
-            aria-valuetext={`${formatDuration(t / 1000)} of ${formatDuration(replay.durationMs / 1000)}`}
           />
-          <span className="text-xs tabular-nums text-muted">
-            {formatDuration(t / 1000)} / {formatDuration(replay.durationMs / 1000)}
-          </span>
-          <Segmented
-            label="Replay speed"
-            size="sm"
-            value={speed}
-            onChange={setSpeed}
-            options={SPEEDS.map((s) => ({ value: s, label: `${s}×` }))}
-          />
-          <span className="text-xs tabular-nums text-muted">
-            {frame ? formatSpeed(frame.speed_mps) : null}
-          </span>
-        </div>
+          <p className="text-xs text-muted" aria-live="off">
+            {frameKind ? `${LEG_LABEL[frameKind]} leg` : 'Leg'}
+            {frame ? ` · ${formatSpeed(frame.speed_mps)}` : null} · replay in wall-clock time
+            (dwells show as stops)
+          </p>
+        </>
       ) : (
         <p className="text-sm text-muted">
           {points.length === 0
@@ -180,6 +270,59 @@ export function TrackReplay({
             : 'Only one position sample.'}
         </p>
       )}
+    </div>
+  )
+}
+
+/** The legs on the replay time axis, in their line style; each segment jumps to its leg. */
+function LegBar({
+  spans,
+  durationMs,
+  service,
+  current,
+  onJump,
+}: {
+  spans: readonly LegSpan[]
+  durationMs: number
+  service: ServiceType
+  current: string | null
+  onJump: (ms: number) => void
+}) {
+  if (spans.length === 0) return null
+  const total = Math.max(1, durationMs)
+  return (
+    <div className="space-y-1">
+      <div className="relative h-2 rounded-sm bg-subtle" aria-hidden="true">
+        {spans.map((s) => (
+          <span
+            key={legKey(s.dispatchId, s.seq)}
+            className="absolute inset-y-0"
+            style={{
+              left: `${(s.startMs / total) * 100}%`,
+              width: `${Math.max(0.8, ((s.endMs - s.startMs) / total) * 100)}%`,
+              background: legColor(s.kind ?? undefined, service),
+              opacity: s.kind === 'RETURN' ? 0.6 : 1,
+            }}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1" role="group" aria-label="Jump to a leg">
+        {spans.map((s) => {
+          const key = legKey(s.dispatchId, s.seq)
+          return (
+            <Button
+              key={key}
+              size="sm"
+              variant={current === key ? 'primary' : 'secondary'}
+              aria-pressed={current === key}
+              onClick={() => onJump(s.startMs)}
+            >
+              {s.kind ? LEG_LABEL[s.kind] : `Leg ${s.seq}`}{' '}
+              <span className="tabular-nums opacity-80">{formatDuration(s.startMs / 1000)}</span>
+            </Button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -207,21 +350,45 @@ function IncidentPin({ detail }: { detail: IncidentDetail }) {
   return null
 }
 
+function HospitalPin({ detail }: { detail: IncidentDetail }) {
+  const map = useMap()
+  const h = detail.hospital
+  useEffect(() => {
+    if (!h) return
+    const m = L.marker(h.location as [number, number], { icon: hospitalIcon(), keyboard: false })
+      .bindTooltip(`Hospital: ${hospitalLabel(h)} · ${edLabel(h.emergency)}`, {
+        className: 'divert-tip',
+        direction: 'top',
+      })
+      .addTo(map)
+    return () => {
+      m.remove()
+    }
+  }, [map, h])
+  return null
+}
+
 function ReplayMarker({
   replay,
   pos,
   heading,
   service,
   id,
+  patient,
 }: {
   replay: Replay | null
   pos: readonly [number, number]
   heading: number
-  service: IncidentDetail['dispatches'][number]['service']
+  service: ServiceType
   id: string
+  patient: boolean
 }) {
   const map = useMap()
-  const ref = useRef<{ marker: L.Marker; body: HTMLElement | null } | null>(null)
+  const ref = useRef<{
+    marker: L.Marker
+    root: HTMLElement | null
+    body: HTMLElement | null
+  } | null>(null)
   useEffect(() => {
     const marker = L.marker(pos as [number, number], {
       icon: vehicleIcon(service, id),
@@ -229,10 +396,8 @@ function ReplayMarker({
       interactive: false,
       zIndexOffset: 1000,
     }).addTo(map)
-    ref.current = {
-      marker,
-      body: marker.getElement()?.querySelector<HTMLElement>('.veh-body') ?? null,
-    }
+    const root = marker.getElement()?.querySelector<HTMLElement>('.veh') ?? null
+    ref.current = { marker, root, body: root?.querySelector<HTMLElement>('.veh-body') ?? null }
     return () => {
       marker.remove()
       ref.current = null
@@ -245,5 +410,8 @@ function ReplayMarker({
     cur.marker.setLatLng(pos as [number, number])
     if (cur.body) cur.body.style.transform = `rotate(${heading.toFixed(1)}deg)`
   }, [pos, heading])
+  useEffect(() => {
+    ref.current?.root?.classList.toggle('has-patient', patient)
+  }, [patient, replay])
   return null
 }
