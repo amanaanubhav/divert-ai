@@ -19,21 +19,25 @@ Stack (`frontend/package.json`): React 19, TypeScript ~6.0 (strict), Vite 8, Tai
 
 ```text
 frontend/
-├── package.json             scripts: dev, build (tsc -b && vite build), typecheck, lint, format(:check), test(:watch)
+├── package.json             scripts: dev, build (tsc -b && vite build), typecheck, lint, format(:check), test(:watch), check:ui
 ├── package-lock.json        locked deps (CI: npm ci)
-├── index.html               SPA shell: #root, theme-color, loads /src/main.tsx
-├── vite.config.ts           dev proxy (/api with WebSocket, /readyz, /healthz -> DIVERT_DEV_API), build + vitest config
+├── index.html               SPA shell: #root, title, light/dark theme-color, loads /src/main.tsx
+├── vite.config.ts           dev proxy (/api with WebSocket, /readyz, /healthz -> DIVERT_DEV_API), build (fonts never inlined) + vitest config
 ├── tsconfig.json            project references -> tsconfig.app.json (src) + tsconfig.node.json (config files)
-├── eslint.config.js         flat config: typescript-eslint strict type-checked, jsx-a11y, react-hooks, prettier
+├── eslint.config.js         flat config: typescript-eslint strict type-checked, jsx-a11y, react-hooks, prettier; scripts/*.mjs as plain Node
 ├── .prettierrc.json         no semicolons, single quotes, trailing commas, width 100
-├── tailwind.config.ts       `ink` palette, Inter font stack, pulse-ring / slide-in animations
+├── tailwind.config.ts       colour tokens + CSS variables from src/lib/palette.ts, z-index names from src/lib/zIndex.ts, Noto Sans stack
 ├── postcss.config.js        tailwindcss + autoprefixer
 ├── Dockerfile               node:22-alpine build -> nginx-unprivileged:1.27-alpine runtime on :8080
 ├── nginx/default.conf.template   nginx config rendered at start (envsubst): SPA, /api proxy, CSP
-├── public/favicon.svg
+├── public/favicon.svg       plain primary-blue square with a white "D" (system font)
+├── scripts/                 dev tooling, not shipped
+│   ├── clickability.mjs     `npm run check:ui`: real-browser check that nothing covers a control (section 4.1)
+│   └── ui-check-mocks.mjs   deterministic API + WebSocket mocks for it
+├── .ui-check/               check:ui screenshots + results.json (gitignored)
 └── src/
-    ├── main.tsx             entry: Leaflet CSS, index.css, <StrictMode><Providers><App/></Providers></StrictMode>
-    ├── index.css            Tailwind layers, dark chrome (color-scheme: dark), Leaflet and marker styles, tile filters
+    ├── main.tsx             entry: Leaflet CSS, Noto Sans 400/500/600 (@fontsource), index.css, <StrictMode><Providers><App/></Providers></StrictMode>
+    ├── index.css            Tailwind layers, focus outline, Leaflet chrome (map isolation), marker styles, dark tile filter
     ├── config.ts            build-time config (VITE_*), apiUrl(), wsUrl(), API key get/set (localStorage)
     ├── vite-env.d.ts        typing of the VITE_* variables
     ├── app/                 application shell
@@ -55,15 +59,17 @@ frontend/
     │   ├── geo.ts           haversine geodesy (same model as backend domain/geo.py), interpolateAlong, splitAt
     │   ├── format.ts        distance / duration / speed / clock formatters, TYPE_LABEL, SERVICE_LABEL, STATUS_LABEL
     │   ├── time.ts          time-zone helpers (city-local days -> UTC instants), RANGE_PRESETS 24h/7d/30d/90d
-    │   ├── theme.ts         SERVICE_COLOR, TYPE_COLOR, SERVICE_GLYPH, SIGNAL_COLOR, STATUS_TONE
+    │   ├── palette.ts       the palette (LIGHT, DARK, SERVICE_PALETTE, SIGNAL_PALETTE, MAP_PALETTE): single source of colour
+    │   ├── zIndex.ts        the one z-index scale (Z_INDEX -> Tailwind z-map ... z-skip)
+    │   ├── theme.ts         SERVICE_COLOR, TYPE_COLOR, SERVICE_GLYPH, SIGNAL_COLOR, MAP_COLOR, CHART_NEUTRAL, STATUS_TONE
     │   └── useNow.ts        Date.now() refreshed on an interval
     ├── components/ui/       shared presentational components
     │   ├── Panel.tsx        Panel (titled section), EmptyState, Spinner, Stat
     │   ├── Button.tsx       Button variants
     │   ├── Badges.tsx       StatusBadge, TypeBadge, ServiceDot
     │   ├── Segmented.tsx    radio group styled as a segmented control (arrow-key navigation)
-    │   ├── toast.ts         zustand toast store + `toast.info/success/warning/error`
-    │   └── Toaster.tsx      renders the toasts
+    │   ├── toast.ts         zustand toast store + `toast.info/success/warning/error`, TOAST_TTL_MS, MAX_TOASTS, clear()
+    │   └── Toaster.tsx      renders the toasts (top centre of the content area, click-through except the close button)
     ├── features/            one folder per feature
     │   ├── city-switcher/   CitySwitcher (cities from GET /cities, fallback to CITY_IDS)
     │   ├── dispatch/        DispatchPanel (type, description, submit), DispatchMapLayer (click to place), nearest.ts (preview)
@@ -123,7 +129,7 @@ flowchart TD
 | Server state from REST: city reference data, incident lists and history, incident detail and track, analytics, `/readyz` | **TanStack Query** (`api/queries.ts`) | Request/response data needs caching, de-duplication, background refetch, cancellation (`signal`), pagination (`useInfiniteQuery` with the keyset cursor) and invalidation after mutations. |
 | Live state pushed by the WebSocket: vehicles with their motion, active signals, tick and sim clock, live incident statuses, activity feed, connection status | **zustand** `useLiveStore` (`store/live.ts`) | A push source, not a request. Each `snapshot` replaces the state wholesale, and `tick` arrives every 0.5 s. The map's `requestAnimationFrame` loop reads `useLiveStore.getState()` 60 times a second and subscribes imperatively (`useLiveStore.subscribe`), so React does not re-render per frame. Components select narrow slices (`useLiveStore((s) => s.vehicles)`). |
 | UI state: tab, city, armed incident type, pending pin, selected vehicle, layer toggles, dark basemap, map focus requests | **zustand** `useUiStore` (`store/ui.ts`) | Shared between the map (imperative Leaflet code) and panels without prop drilling. The tab and city are mirrored to the URL hash (2.5). |
-| Toasts | zustand `useToasts` (`components/ui/toast.ts`) | Fire-and-forget from anywhere. Errors stay 8 s and other tones 4.5 s. At most 5 are kept. |
+| Toasts | zustand `useToasts` (`components/ui/toast.ts`) | Fire-and-forget from anywhere. `TOAST_TTL_MS`: info and success 3.5 s, warning 6 s, error 10 s. At most 3 are kept (`MAX_TOASTS`). `App` calls `clear()` when the tab or city changes. |
 
 How the two sides are bridged:
 - **Stream to queries.** `api/useCityStream.ts` invalidates `incidents(city)`, `city(city)` (unit availability) and `['analytics', city]` when an `incident_updated` or `vehicle_removed` arrives, debounced by `INVALIDATE_DEBOUNCE_MS = 700`.
@@ -177,12 +183,12 @@ Keys come from the `queryKeys` factory. Mutations (`useCreateIncident`, `useCanc
 
 | Layer | Technique | Notes |
 |---|---|---|
-| `BaseTiles` (`MapHelpers.tsx`) | `TileLayer` | Light tiles get the `.tiles-muted` CSS filter. Dark mode uses `VITE_TILE_URL_DARK`, or the light tiles with the `.tiles-dark` filter. |
+| `BaseTiles` (`MapHelpers.tsx`) | `TileLayer` | Light: the standard tiles, unfiltered. Dark basemap: `VITE_TILE_URL_DARK`, or the light tiles with the `.tiles-dark` filter. |
 | `FitToBBox`, `FocusController` | `useMap()` effects | Fits the city bbox and restricts panning to the bbox plus 35 %. A `ResizeObserver` refits until the user moves the map. `flyTo` handles `useUiStore.focus` requests. |
 | `CityBoundsLayer`, `SignalsLayer`, `StationsLayer` (`ReferenceLayers.tsx`) | `L.rectangle` / `L.circleMarker` in a `layerGroup` on the **canvas** | No DOM node per marker, so hundreds of signals and over a thousand stations stay smooth. Radius depends on zoom. Tooltips are created lazily. Stations are hollow when no unit is free. |
 | `IncidentsLayer` | react-leaflet `Marker` + `divIcon` | Active incidents only. |
 | `LiveVehiclesLayer` | Imperative `L.marker` with a `divIcon` (DOM) + three canvas polylines per route (faded dashed "travelled", white casing, solid "remaining") | Re-synced only when `vehicles` changes (`useLiveStore.subscribe`). Moved by a `requestAnimationFrame` loop. |
-| `ActiveSignalsLayer` | Imperative `L.marker` per active signal, updated in place each tick | Green pulsing for PREEMPTED, amber for CONFLICT, with an ETA and lane label and an approach arrow. Never re-created, so the pulse animation does not restart. |
+| `ActiveSignalsLayer` | Imperative `L.marker` per active signal, updated in place each tick | PREEMPTED: a green dot that blinks on/off (static with reduced motion). CONFLICT: an amber diamond (shape, not only colour). Both carry an ETA and lane label and an approach arrow. Never re-created, so the blink does not restart. |
 | `DispatchMapLayer` | `useMapEvents` + react-leaflet `Marker` / `Polyline` | A click inside the bbox sets the pending pin (outside: a warning, nothing sent). The pin is draggable. A straight-line preview goes to the nearest station of the armed service (`nearest.ts`, haversine; the server ranks by routed ETA). |
 
 **Interpolation between ticks** (`store/live.ts`, `lib/geo.ts`):
@@ -209,18 +215,52 @@ The UI store's initial `tab` and `city` come from `location.hash` at module load
 
 An unknown city in the hash passes `parseHash`. `GET /cities/{city}` then fails (the app shows "Could not load ..." with a Retry button), and the stream stops with status `unknown_city` (close 4404). Changing city resets the pending pin and the selection (`setCity`). `LiveView` and `HistoryView` are keyed by city id, so their local state resets.
 
-### 2.6 Tailwind, theme and dark mode
+### 2.6 Styling, theme and layers
 
-- **The chrome is always dark.** `index.css` sets `:root { color-scheme: dark }` and `body` uses `bg-ink-950 text-slate-200`. There is no light theme and no `prefers-color-scheme` switch.
-- `tailwind.config.ts` adds the `ink` palette (`950 #0b0f17` ... `600 #364157`), the `pulse-ring` (1.4 s) and `slide-in` (180 ms) animations, and a font stack starting with Inter. No font files are bundled, and the CSP only allows `font-src 'self'`, so Inter shows only where it is installed locally. Otherwise the system UI font is used.
-- **"Dark mode" means the dark basemap toggle.** `useUiStore.darkTiles` is persisted in `localStorage` key `divert.darkTiles`. `TrackReplay` honours it too.
-- Semantic colours live in one place, `lib/theme.ts`:
-  - `SERVICE_COLOR`: ambulance `#2563eb`, fire engine `#ea580c`, police `#7c3aed`
-  - `TYPE_COLOR`, `SERVICE_GLYPH`
-  - `SIGNAL_COLOR`: NORMAL `#64748b`, PREEMPTED `#16a34a`, CONFLICT `#f59e0b`
-  - `STATUS_TONE` (badge classes)
+The console is meant to look like a plain civic operations tool: light by default, flat panels, one muted primary colour, status colours only for status.
 
-  Shape and label are always the second cue next to colour.
+**Palette (`lib/palette.ts`, the single source).** `tailwind.config.ts` turns it into CSS variables (`--c-page: 245 246 248`, ...) on `:root` and into Tailwind tokens that use them (`rgb(var(--c-x) / <alpha-value>)`, so `bg-fg/10` works). Components use only the tokens, never raw hex or Tailwind's grey/rose scales.
+
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `page` | `#f5f6f8` | `#141517` | page background |
+| `surface` | `#ffffff` | `#1c1e21` | panels, header, drawer, popover, toasts |
+| `subtle` | `#eef1f4` | `#25282c` | table header, stat tiles, hover |
+| `line` | `#d7dbe0` | `#33373d` | 1 px panel borders and dividers |
+| `field` | `#8c959f` | `#6b737c` | input borders (>= 3:1) |
+| `fg` / `muted` | `#1f2328` / `#57606a` | `#e4e6e9` / `#a0a7af` | text / secondary text |
+| `primary` (+ `-hover`, `-active`, `-subtle`) | `#1f4e79` (`#183f62`, `#12304b`, `#e7eef6`) | `#2a5f94` (`#2f6aa3`, `#245281`, `#1f2d3d`) | primary buttons, selected segment, selected row |
+| `accent` | `#1f4e79` | `#8ab4e0` | primary as text: selected tab underline, links, focus outline |
+| `ok` / `warn` / `bad` / `info` (+ `-subtle`) | `#1e6b34` / `#8a5a00` / `#b42318` / `#1f4e79` | `#6cc082` / `#d9a441` / `#f08c84` / `#8ab4e0` | status text and badge backgrounds only |
+
+- **Dark mode** follows `prefers-color-scheme` (the same variables, redefined in a media query; neutral charcoal, no navy or neon). There is no separate theme switch. The map's **Dark basemap** toggle (`useUiStore.darkTiles`, `localStorage` key `divert.darkTiles`) defaults to the OS scheme when nothing is stored; `TrackReplay` honours it too.
+- **Map colours** are the same in both themes (they sit on the tiles): `SERVICE_PALETTE` ambulance `#0072b2`, fire engine `#d55e00`, police `#3d4451` (Okabe-Ito based); `SIGNAL_PALETTE` NORMAL `#6e7781`, PREEMPTED `#1a7f37`, CONFLICT `#bf8700`; `MAP_PALETTE` pending pin `#1f2328`, service-area outline `#1f4e79`. `index.css` reads the signal and map ones as `--map-*` variables. `lib/theme.ts` re-exports them (`SERVICE_COLOR`, `TYPE_COLOR`, `SIGNAL_COLOR`, `MAP_COLOR`) with `SERVICE_GLYPH`, `CHART_NEUTRAL` and `STATUS_TONE` (badge classes). Shape and label are always the second cue next to colour (glyphs per service, a diamond for a conflict).
+- **`lib/palette.test.ts`** keeps it honest: WCAG AA (4.5:1) for every text/background pair in light and dark, 3:1 for input borders, the focus outline, white glyphs on service colours and service colours on light surfaces, and a minimum CIE76 ΔE of 20 between service colours and between signal colours under normal, protan, deutan and tritan vision (Machado 2009 simulation). The old blue/violet pair failed this for deuteranopia (ΔE 1.7).
+
+**Type.** Self-hosted **Noto Sans** 400/500/600 (`@fontsource/noto-sans`, imported in `main.tsx`; its subsets include Latin and Devanagari, while Bengali would need the separate Noto Sans Bengali family). The files are emitted to `/assets` (never inlined: `vite.config.ts` `assetsInlineLimit`), so the nginx CSP `font-src 'self'` holds. Fallback: Segoe UI, Roboto, Helvetica, Arial, sans-serif. Body text is 14 px. Labels are sentence case with normal letter-spacing, no weight above 600, figures use `tabular-nums`; monospace is kept for identifiers (vehicle ids, signal ids, request ids).
+
+**Shapes and effects.** 4 px corners (`rounded`), 1 px `border-line` instead of rings or glows, `shadow` is at most `0 1px 2px` (popover, drawer, toasts). No gradients, blur or decorative animation. The only animation is the pre-empted signal blink; the connection dot is static. Focus: one global `:focus-visible` outline (2 px `accent`, offset 2 px; `focus-inset` for full-width rows and tabs).
+
+**Branding.** The header shows a text wordmark "DIVERT" (600) and the subtitle "Emergency dispatch console" (hidden below `sm`). The favicon is a plain `#1f4e79` square with a white "D" in a system font. Page title "DIVERT – Emergency dispatch console".
+
+**Z-index scale (`lib/zIndex.ts`, Tailwind `z-<name>`).** One scale, lower never covers higher. Do not use numeric `z-[…]` classes.
+
+| Layer | Value | Used by |
+|---|---|---|
+| `map` | 0 | `.leaflet-container` is `isolation: isolate`, so Leaflet's own 200-1000 stay inside each map |
+| `map-overlay` | 10 | layer toggles and legend over the live map |
+| `sticky` | 20 | sticky History table header |
+| `header` | 100 | the app header (`relative z-header`); its API-key popover (`z-popover`) paints inside it |
+| `popover` | 200 | header popovers |
+| `drawer` | 300 | modal incident drawer and backdrop |
+| `toast` | 400 | notifications |
+| `skip` | 500 | focused "Skip to content" link |
+
+**Layout rules that keep every control clickable.**
+- `<main>` scrolls (`overflow-y-auto`) inside a `relative` wrapper below the header, so the header (tabs, city, API key) is always reachable.
+- Live: from `lg` the three columns fill the content area and the side columns scroll; below `lg` the panels stack at their natural height (map `55vh`, min 18 rem) and `<main>` scrolls. Never give the stacked layout a fixed height with `min-h-0` children: the grid rows then shrink to the viewport and later panels paint over earlier ones (the bug fixed in Stage 5-UI).
+- Toasts sit at the top centre of the content area (never over the header), let clicks through (`pointer-events: none`) except on their close button, are short-lived and are cleared on tab or city change.
+- History hides the coordinates column below `xl` so the Details buttons stay in view on tablets.
 
 ### 2.7 Configuration (`config.ts`)
 
@@ -292,14 +332,30 @@ sequenceDiagram
 | `features/history/replay.test.ts` | `prepareReplay` / `frameAt` road-following replay |
 | `features/incidents/merge.test.ts` | Forward-only status merge of REST and live data; also `parseHash` / `formatHash` round-trip (hash routing) |
 | `features/analytics/AnalyticsView.test.tsx` | Per-city cards and the selected city's charts |
+| `lib/palette.test.ts` | WCAG AA contrast of every text/background token pair (light and dark), 3:1 for borders, focus and service colours, colour-blind separation (ΔE >= 20) of service and signal colours, CSS variable generation |
 
 **Not tested:**
-- **No real-browser end-to-end tests**: no Playwright or Cypress, so no test drives the built bundle against a running backend.
+- **No functional end-to-end tests in CI.** The real-browser `check:ui` (4.1) only checks that controls are reachable; it is run by hand, not in CI.
 - Nothing that needs Leaflet's canvas: `LiveMap`, `LiveVehiclesLayer`, `ReferenceLayers`, `ActiveSignalsLayer`, `DispatchMapLayer`, `TrackReplay`. jsdom has no canvas. Their logic is covered through `store/live.ts`, `lib/geo.ts` and `replay.ts`.
 - The `App` shell, including the `useHashRoute` effect (`parseHash` / `formatHash` are tested), `useCityStream` as a whole (its parts are tested), `IncidentsPanel`, `StatsPanel`, `ConnectionStatus`, `ApiKeyButton`.
-- The nginx configuration, visual regressions, and accessibility beyond the `jsx-a11y` lint rules.
+- The nginx configuration, pixel-level visual regressions, and accessibility beyond the `jsx-a11y` lint rules and the palette contrast test.
 
 CI (`.github/workflows/ci.yml`, job `frontend`, Node 22) runs `npm ci`, `format:check`, `lint` (zero warnings), `typecheck`, `test` and `build`. The `docker` job then builds the image (without pushing).
+
+### 4.1 UI clickability check (`npm run check:ui`)
+
+A dev-only regression check for overlapping UI (`scripts/clickability.mjs`). jsdom has no layout engine, so it cannot see one panel painting over another; this drives a real browser instead. `playwright-core` is a devDependency used only here: it drives the locally installed Microsoft Edge (falls back to Chrome, then a Playwright Chromium if one was installed with `npx playwright-core install chromium`) and downloads no browser. Nothing of it is in the bundle or the nginx image.
+
+For every city (Delhi, Kolkata, Bengaluru) and viewport (360x740, 768x1024, 1024x768, 1280x800, 1440x900, 1920x1080) it opens Live, History and Analytics and, for every visible button, link, tab, radio, checkbox and input, asserts that `document.elementFromPoint(centre)` is the control or inside it. Controls already on screen are tested where they are; controls clipped by a scroll area are scrolled into view first, and one that cannot be is reported as unreachable. It repeats the check after a dispatch (map click + Dispatch, success toast visible), after switching to History right after it, with a toast raised in History (API-key Save), with the API-key popover open (its own controls) and with the History drawer open (dialog controls). It also records any Content-Security-Policy violation reported in the browser console (for example a font or script the CSP blocks). Screenshots and `results.json` go to `frontend/.ui-check/` (gitignored). It exits 1 on any covered or unreachable control or CSP violation.
+
+```bash
+npm run build && npm run check:ui                        # mock mode: vite preview of dist/, API + WebSocket mocked (scripts/ui-check-mocks.mjs), tiles stubbed
+npm run check:ui -- --url http://localhost:8080         # the running stack (POST/DELETE still mocked: no real incidents)
+npm run check:ui -- --url http://localhost:8080 --mock-api   # the deployed bundle + nginx CSP, with the whole API mocked
+npm run check:ui -- --cities delhi --viewports 1440x900,360x740 --dark --real-tiles --headed
+```
+
+Stage 5-UI result: before the fix the running stack failed 66 checks in 40 of 144 states (stacked Live panels painting over the Dispatch panel below `lg`; bottom-right toasts covering Zoom out and the History Details buttons). After the fix: 0 failures in all 144 states, in mock mode and against the rebuilt :8080 image (`--mock-api`), with no CSP violations.
 
 ---
 
@@ -369,7 +425,7 @@ In development, `npm run dev` (port 5173) proxies `/api` (WebSocket included), `
    - UI state through `useUiStore`
 
    Use `useMemo` for derived lists. Do not subscribe to the whole store.
-3. Place it in `app/LiveView.tsx`. The grid is `lg:grid-cols-[19rem,minmax(0,1fr),21rem]`: the left `aside` has dispatch and stats, the centre has the map, the right `aside` has incidents and fleet. For the other tabs, add it inside `HistoryView` or `AnalyticsView`.
+3. Place it in `app/LiveView.tsx`. The grid is `lg:grid-cols-[17rem,minmax(0,1fr),19rem]` (`xl`: 19rem / 21rem): the left `aside` has dispatch and stats, the centre has the map, the right `aside` has incidents and fleet. Below `lg` everything stacks at natural height and `<main>` scrolls; keep `min-h-0` / fixed heights behind `lg:` (2.6). For the other tabs, add it inside `HistoryView` or `AnalyticsView`. Style it with the palette tokens and `Panel`; run `npm run check:ui` afterwards.
 4. Test with `renderWithProviders(<NamePanel city={DELHI} />)`. Seed live state with `useLiveStore.getState().reset('delhi')` and then `apply({type: 'snapshot', ...})`. Stub REST with `mockFetch([...])`. `FleetPanel.test.tsx` is the model.
 
 ### 7.2 Add a tab

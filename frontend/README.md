@@ -12,7 +12,26 @@ npm run typecheck    # tsc -b --noEmit
 npm test             # vitest (jsdom)
 npm run build        # tsc -b && vite build -> dist/
 npm run format:check # prettier
+npm run check:ui     # after build: real-browser check that no control is covered (see below)
 ```
+
+## UI check
+
+`npm run check:ui` (`scripts/clickability.mjs`) opens Live, History and Analytics for each
+city at six viewports (360 to 1920 px wide) in the locally installed Microsoft Edge (via
+`playwright-core`, a dev-only dependency; no browser download, nothing shipped) and asserts
+that `document.elementFromPoint` at the centre of every visible control hits that control:
+nothing covers it. It repeats this with a dispatch toast, the API-key popover and the
+History drawer open. By default it serves `dist/` with `vite preview` and mocks the API and
+WebSocket; `-- --url http://localhost:8080` checks the running stack instead (POST/DELETE
+stay mocked). Screenshots and `results.json` land in `.ui-check/` (gitignored).
+
+## Look
+
+Light by default (dark follows `prefers-color-scheme`), self-hosted Noto Sans, flat white
+panels with 1 px borders and 4 px corners, one civic-blue primary (`#1f4e79`), status
+colours only for status. Colours: `src/lib/palette.ts` (checked by `palette.test.ts` for
+WCAG AA and colour-blind separation). Layers: `src/lib/zIndex.ts`.
 
 `DIVERT_DEV_API=http://host:8000 npm run dev` points the dev proxy at another backend.
 

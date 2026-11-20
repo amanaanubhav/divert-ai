@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# UI clickability check output (npm run check:ui)
+.ui-check

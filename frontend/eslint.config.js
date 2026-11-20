@@ -47,6 +47,15 @@ export default tseslint.config(
     },
   },
   {
+    // dev tooling (UI clickability check): plain Node ESM
+    files: ['scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: { ecmaVersion: 2023, globals: { ...globals.node, ...globals.browser } },
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['*.config.{js,ts}', 'eslint.config.js'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
