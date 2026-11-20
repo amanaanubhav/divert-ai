@@ -244,6 +244,17 @@ def test_incompatible_claimants_are_sequenced_and_the_loser_is_advised(clock: Cl
     assert all(a == 0.0 or a >= 2.0 for a in advisories)  # (it arrives after its green)
     assert not violations, "the queued ambulance entered the junction before its green"
     assert amb.preempted_passed == 1  # it got the junction after the police car
+    # stage 5 fix-2 B5: every event of the claim carries how often it was queued, so the
+    # persisted row keeps "contested" after it is served (state PREEMPTED at release)
+    assert conflicts[0]["conflicts"] == 1
+    (claimed,) = of(events, "preemption_claimed", vehicle_id="AMB-1")
+    assert (claimed["state"], claimed["conflicts"]) == ("CONFLICT", 0)
+    (green,) = of(events, "preempt_green", vehicle_id="AMB-1")
+    assert (green["state"], green["conflicts"]) == ("PREEMPTED", 1)
+    (rel,) = of(events, "preemption_released", vehicle_id="AMB-1")
+    assert (rel["state"], rel["conflicts"], rel["outcome"]) == ("PREEMPTED", 1, "CLEARED")
+    (pcr_rel,) = of(events, "preemption_released", vehicle_id="PCR-1")
+    assert pcr_rel["conflicts"] == 0
 
 
 def test_priority_window_gives_the_ambulance_the_junction(clock: Clock) -> None:

@@ -29,6 +29,11 @@ from divert.domain.enums import (
 FREE_LEFT_PATH: Final = "$[*] ? (@.free_left == true)"  # corridor entries that are free lefts
 
 
+def _contested() -> sa.ColumnElement[bool]:
+    """A claim queued behind another phase at least once (served later or not)."""
+    return sa.or_(SignalPreemption.conflicts > 0, SignalPreemption.state == SignalState.CONFLICT)
+
+
 def _f(x: Any, nd: int = 1) -> float | None:
     return None if x is None else round(float(x), nd)
 
@@ -99,8 +104,11 @@ async def summary(
         await session.execute(
             sa.select(
                 sa.func.count(),
-                sa.func.count().filter(SignalPreemption.state == SignalState.CONFLICT),
+                sa.func.count().filter(_contested()),
                 sa.func.count(sa.distinct(SignalPreemption.signal_id)),
+                sa.func.count().filter(
+                    _contested(), SignalPreemption.state == SignalState.PREEMPTED
+                ),
             )
             .join(Dispatch, Dispatch.id == SignalPreemption.dispatch_id)
             .join(Incident, Incident.id == Dispatch.incident_id)
@@ -166,7 +174,8 @@ async def summary(
         **legs,
         "preemptions": {
             "total": pre[0],
-            "conflicts": pre[1],
+            "conflicts": pre[1],  # contested claims, whether served later or not
+            "conflicts_served": pre[3],  # contested claims whose phase was served later
             "distinct_signals": pre[2],
             "top_signals": [{"signal_id": s, "count": n} for s, n in top],
             "outcomes": by_outcome,

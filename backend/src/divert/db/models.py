@@ -84,6 +84,9 @@ class Station(Base):
     # healthcare=* tag - hospital selection skips emergency=no and non-acute facilities
     emergency: Mapped[str | None] = mapped_column(sa.String(3))
     healthcare: Mapped[str | None] = mapped_column(sa.String(32))
+    # hospitals only: OSM healthcare:speciality (raw, ';'-separated) - TRANSPORT skips
+    # hospitals offering only specialities that cannot take an emergency patient
+    speciality: Mapped[str | None] = mapped_column(sa.Text)
     created_at: Mapped[datetime] = utc_now_column()
     updated_at: Mapped[datetime] = utc_now_column(onupdate=True)
 
@@ -347,9 +350,13 @@ class SignalPreemption(Base):
     phase_state_at_claim: Mapped[PhaseStateAtClaim | None] = mapped_column(
         str_enum(PhaseStateAtClaim, "phase_state_at_claim")
     )
+    # times the claim was queued behind another phase: ``state`` is the final state (a
+    # queued claim that was served ends PREEMPTED), this keeps that it was contested
+    conflicts: Mapped[int] = mapped_column(sa.SmallInteger, server_default=sa.text("0"))
 
     __table_args__ = (
         sa.CheckConstraint("state <> 'NORMAL'", name="not_normal"),
+        sa.CheckConstraint("conflicts >= 0", name="conflicts"),
         sa.Index("ix_signal_preemptions_dispatch_id", "dispatch_id"),
         sa.Index("ix_signal_preemptions_signal_claimed", "signal_id", "claimed_at"),
         sa.Index("ix_signal_preemptions_city_claimed", "city_id", "claimed_at"),

@@ -42,7 +42,7 @@ async def test_head_has_all_tables_and_postgis(engine: AsyncEngine) -> None:
     from alembic.script import ScriptDirectory  # noqa: PLC0415
 
     head = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_current_head()
-    assert rev == head == "0004_trip_legs"
+    assert rev == head == "0005_contested_claims_speciality"
 
 
 async def test_spatial_and_time_indexes(engine: AsyncEngine) -> None:

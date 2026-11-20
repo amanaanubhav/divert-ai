@@ -110,6 +110,13 @@ _RESTORABLE: Final = frozenset(
 )
 
 
+def _conflicts(kind: HistoryEventType, ev: Mapping[str, Any]) -> int:
+    """Times the claim was queued so far (events written before stage 5 fix-2 carry no
+    count: a conflict event means at least one)."""
+    floor = 1 if kind is HistoryEventType.PREEMPTION_CONFLICT else 0
+    return max(floor, int(ev.get("conflicts") or 0))
+
+
 class BadEvent(ValueError):
     """The event can never be applied (schema violation) - goes straight to the DLQ."""
 
@@ -345,6 +352,7 @@ class HistoryWriter:
                 "crossed_at": _opt_ts(ev.get("crossed_at")) if released else None,
                 "waited_s": _opt_float(ev.get("waited_s")) if released else None,
                 "outcome": _opt_enum(PreemptOutcome, ev.get("outcome")) if released else None,
+                "conflicts": _conflicts(kind, ev),
             }
         except (KeyError, TypeError, ValueError) as exc:
             raise BadEvent(f"bad preemption event: {exc!r}") from exc
@@ -353,17 +361,20 @@ class HistoryWriter:
         stmt = pg_insert(SignalPreemption).values(**row)
         x = stmt.excluded
         sp = SignalPreemption
+        contested = sa.func.greatest(sp.conflicts, x.conflicts)  # the count only grows
         if kind is HistoryEventType.PREEMPTION_CLAIMED:
             stmt2 = stmt.on_conflict_do_nothing(index_elements=["event_id"])
         elif kind is HistoryEventType.PREEMPTION_CONFLICT:
             stmt2 = stmt.on_conflict_do_update(
-                index_elements=["event_id"], set_={"state": SignalState.CONFLICT}
+                index_elements=["event_id"],
+                set_={"state": SignalState.CONFLICT, "conflicts": contested},
             )
         elif kind is HistoryEventType.PREEMPT_GREEN:  # green for the claim: when, and how
             stmt2 = stmt.on_conflict_do_update(
                 index_elements=["event_id"],
                 set_={
-                    "state": SignalState.PREEMPTED,
+                    "state": SignalState.PREEMPTED,  # served - "conflicts" keeps the queueing
+                    "conflicts": contested,
                     "green_at": sa.func.coalesce(sp.green_at, x.green_at),
                     "phase_state_at_claim": sa.func.coalesce(
                         sp.phase_state_at_claim, x.phase_state_at_claim
@@ -374,6 +385,8 @@ class HistoryWriter:
             stmt2 = stmt.on_conflict_do_update(
                 index_elements=["event_id"],
                 set_={
+                    "state": x.state,  # the claim's final state (queued or served)
+                    "conflicts": contested,
                     "released_at": sa.func.coalesce(sp.released_at, x.released_at),
                     "outcome": sa.func.coalesce(sp.outcome, x.outcome),
                     "crossed_at": sa.func.coalesce(sp.crossed_at, x.crossed_at),

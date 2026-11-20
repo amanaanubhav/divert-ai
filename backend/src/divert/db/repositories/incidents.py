@@ -433,6 +433,7 @@ class IncidentRepository:
                     SignalPreemption.waited_s,
                     SignalPreemption.outcome,
                     SignalPreemption.phase_state_at_claim,
+                    SignalPreemption.conflicts,
                 )
                 .join(Dispatch, Dispatch.id == SignalPreemption.dispatch_id)
                 .where(Dispatch.incident_id == incident_id)
@@ -507,6 +508,10 @@ class IncidentRepository:
                 "waited_s": r.waited_s,
                 "outcome": _val(r.outcome),
                 "phase_state_at_claim": _val(r.phase_state_at_claim),
+                # state is the final one; a claim queued behind another phase stays
+                # "contested" after it is served (waited_s: its wait at the stop line)
+                "conflicts": r.conflicts,
+                "contested": r.conflicts > 0 or _val(r.state) == "CONFLICT",
             }
             for r in prow
         ]
