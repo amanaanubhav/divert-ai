@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from divert.db.geo_sql import lat_of, linestring_wkt, lng_of, point_wkt
 from divert.db.models import (
     Dispatch,
+    DispatchLeg,
     Incident,
     IncidentEvent,
     Outbox,
@@ -30,17 +31,27 @@ from divert.db.models import (
 )
 from divert.db.models import Station as StationRow
 from divert.domain.enums import (
+    ACTIVE_INCIDENT_STATUSES,
     TERMINAL_INCIDENT_STATUSES,
+    DestinationKind,
+    DispatchStatus,
     IncidentStatus,
     IncidentType,
+    LegKind,
     ServiceType,
     UnitStatus,
 )
 from divert.domain.geo import LatLng
+from divert.domain.models import IncidentZone
 
 
 def _iso(ts: datetime | None) -> str | None:
     return None if ts is None else ts.isoformat()
+
+
+def _val(x: Any) -> Any:
+    """An enum column's plain value (None stays None)."""
+    return getattr(x, "value", x)
 
 
 def route_points_sql(col: Any) -> sa.ColumnElement[str]:
@@ -95,6 +106,7 @@ class NewDispatch:
     corridor: list[dict[str, Any]]
     now: datetime
     command: dict[str, Any]
+    route_choice: dict[str, Any] | None = None  # kept in the "dispatched" event payload
 
 
 class IncidentRepository:
@@ -133,6 +145,30 @@ class IncidentRepository:
                 segment_speeds_mps=list(d.segment_speeds_mps),
                 eta_model=d.eta_model,
                 dispatched_at=d.now,
+                status=DispatchStatus.DISPATCHED,
+            )
+        )
+        # the RESPONSE leg (seq 0): the dispatch's own route (design §5)
+        await s.execute(
+            sa.insert(DispatchLeg).values(
+                dispatch_id=d.dispatch_id,
+                seq=0,
+                kind=LegKind.RESPONSE,
+                emergency=True,
+                origin=point_wkt(d.route_points[0]),
+                destination=point_wkt(d.location),
+                destination_kind=DestinationKind.SCENE,
+                destination_station_id=None,
+                route=linestring_wkt(d.route_points),
+                distance_m=d.distance_m,
+                predicted_eta_s=d.predicted_eta_s,
+                segment_speeds_mps=list(d.segment_speeds_mps),
+                corridor=d.corridor,
+                route_choice=d.route_choice,
+                eta_model=d.eta_model,
+                planned_at=d.now,
+                started_at=d.now,
+                started_trip_s=0.0,
             )
         )
         updated = await s.execute(
@@ -174,6 +210,7 @@ class IncidentRepository:
                         "distance_m": round(d.distance_m, 1),
                         "predicted_eta_s": round(d.predicted_eta_s, 1),
                         "corridor_signals": len(d.corridor),
+                        "route_choice": d.route_choice,
                     },
                     "ts": d.now,
                 },
@@ -184,6 +221,21 @@ class IncidentRepository:
         )
         assert outbox_id is not None
         return int(outbox_id)
+
+    async def active_incident_zones(self, city_id: str) -> list[IncidentZone]:
+        """Active incidents of the city (crowding zones for route choice, design §2)."""
+        rows = await self.session.execute(
+            sa.select(
+                Incident.id,
+                Incident.type,
+                lat_of(Incident.geom).label("lat"),
+                lng_of(Incident.geom).label("lng"),
+            ).where(
+                Incident.city_id == city_id,
+                Incident.status.in_(sorted(ACTIVE_INCIDENT_STATUSES)),
+            )
+        )
+        return [IncidentZone(str(r.id), IncidentType(r.type), LatLng(r.lat, r.lng)) for r in rows]
 
     async def lock_incident(self, city_id: str, incident_id: uuid.UUID) -> Incident | None:
         return (
@@ -251,6 +303,9 @@ class IncidentRepository:
             Incident.cancelled_at,
             Incident.failed_at,
             Incident.failure_reason,
+            Incident.hospital_station_id,
+            Incident.transport_started_at,
+            Incident.at_hospital_at,
         )
 
     @staticmethod
@@ -271,6 +326,9 @@ class IncidentRepository:
             "cancelled_at": _iso(r.cancelled_at),
             "failed_at": _iso(r.failed_at),
             "failure_reason": r.failure_reason,
+            "hospital_station_id": r.hospital_station_id,
+            "transport_started_at": _iso(r.transport_started_at),
+            "at_hospital_at": _iso(r.at_hospital_at),
         }
 
     async def list_incidents(
@@ -332,6 +390,7 @@ class IncidentRepository:
                     lat_of(StationRow.geom).label("st_lat"),
                     lng_of(StationRow.geom).label("st_lng"),
                     Dispatch.service,
+                    Dispatch.status,
                     route_points_sql(Dispatch.route).label("route"),
                     Dispatch.distance_m,
                     Dispatch.predicted_eta_s,
@@ -361,6 +420,19 @@ class IncidentRepository:
                     SignalPreemption.eta_at_claim_s,
                     SignalPreemption.claimed_at,
                     SignalPreemption.released_at,
+                    SignalPreemption.leg_seq,
+                    SignalPreemption.movement,
+                    SignalPreemption.lane_index,
+                    SignalPreemption.lanes_total,
+                    SignalPreemption.free_left,
+                    SignalPreemption.required_lead_s,
+                    SignalPreemption.transition_s,
+                    SignalPreemption.queue_clear_s,
+                    SignalPreemption.green_at,
+                    SignalPreemption.crossed_at,
+                    SignalPreemption.waited_s,
+                    SignalPreemption.outcome,
+                    SignalPreemption.phase_state_at_claim,
                 )
                 .join(Dispatch, Dispatch.id == SignalPreemption.dispatch_id)
                 .where(Dispatch.incident_id == incident_id)
@@ -380,11 +452,17 @@ class IncidentRepository:
                 .order_by(IncidentEvent.ts, IncidentEvent.id)
             )
         ).all()
+        choices = {
+            str(r.dispatch_id): r.payload.get("route_choice")
+            for r in erows
+            if r.type == "dispatched" and r.dispatch_id is not None and r.payload
+        }
         incident["dispatches"] = [
             {
                 "id": str(r.id),
                 "vehicle_id": r.unit_id,
                 "service": ServiceType(r.service).value,
+                "status": DispatchStatus(r.status).value,
                 "station": {
                     "id": r.station_id,
                     "name": r.station_name,
@@ -401,6 +479,7 @@ class IncidentRepository:
                 "arrived_at": _iso(r.arrived_at),
                 "ended_at": _iso(r.ended_at),
                 "end_reason": r.end_reason,
+                "route_choice": choices.get(str(r.id)),
             }
             for r in drows
         ]
@@ -415,6 +494,19 @@ class IncidentRepository:
                 "eta_at_claim_s": r.eta_at_claim_s,
                 "claimed_at": _iso(r.claimed_at),
                 "released_at": _iso(r.released_at),
+                "leg_seq": r.leg_seq,
+                "movement": _val(r.movement),
+                "lane_index": r.lane_index,
+                "lanes_total": r.lanes_total,
+                "free_left": r.free_left,
+                "required_lead_s": r.required_lead_s,
+                "transition_s": r.transition_s,
+                "queue_clear_s": r.queue_clear_s,
+                "green_at": _iso(r.green_at),
+                "crossed_at": _iso(r.crossed_at),
+                "waited_s": r.waited_s,
+                "outcome": _val(r.outcome),
+                "phase_state_at_claim": _val(r.phase_state_at_claim),
             }
             for r in prow
         ]
@@ -440,6 +532,7 @@ class IncidentRepository:
                 lng_of(VehiclePosition.geom).label("lng"),
                 VehiclePosition.speed_mps,
                 VehiclePosition.along_m,
+                VehiclePosition.leg_seq,
                 sa.func.row_number().over(order_by=VehiclePosition.ts).label("rn"),
                 sa.func.count().over().label("n"),
             )
@@ -462,6 +555,7 @@ class IncidentRepository:
                 "pos": [r.lat, r.lng],
                 "speed_mps": r.speed_mps,
                 "along_m": r.along_m,
+                "leg_seq": r.leg_seq,
             }
             for r in rows
         ]

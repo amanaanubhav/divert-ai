@@ -25,6 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from divert.db.repositories import analytics
 from divert.db.repositories.incidents import IncidentRepository
+from divert.db.repositories.legs import LegRepository
+from divert.db.repositories.reference import ReferenceRepository
 from divert.domain.enums import IncidentStatus, IncidentType
 
 MAX_ANALYTICS_RANGE: Final = timedelta(days=366)
@@ -74,8 +76,28 @@ class HistoryService:
         return {"items": items, "next_cursor": nxt}
 
     async def incident_detail(self, incident_id: uuid.UUID) -> dict[str, Any] | None:
-        """Incident + dispatch + route + preemptions + timeline (None if unknown)."""
-        return await self.incidents.incident_detail(incident_id)
+        """Incident + dispatches + legs (each with its route_choice / hospital_choice) +
+        hospital + preemptions + timeline (None if unknown)."""
+        detail = await self.incidents.incident_detail(incident_id)
+        if detail is None:
+            return None
+        ids = [uuid.UUID(d["id"]) for d in detail["dispatches"]]
+        detail["legs"] = [
+            {"dispatch_id": leg.dispatch_id, **leg.to_json()}
+            for leg in await LegRepository(self.session).legs_of(ids)
+        ]
+        detail["hospital"] = None
+        hid = detail.get("hospital_station_id")
+        station = None if hid is None else await ReferenceRepository(self.session).get_station(hid)
+        if station is not None:
+            detail["hospital"] = {
+                "id": station.id,
+                "name": station.name,
+                "location": [station.pos.lat, station.pos.lng],
+                "emergency": station.emergency,
+                "healthcare": station.healthcare,
+            }
+        return detail
 
     async def track(self, incident_id: uuid.UUID, max_points: int) -> dict[str, Any] | None:
         """Sampled recorded positions (None if the incident is unknown)."""

@@ -2,10 +2,15 @@
 
 1. normalise the type (aliases, any case) and check the point is in the city bbox (422)
    - before anything is created (regression guarantee 1);
-2. the N nearest stations of the service with AVAILABLE units (PostGIS KNN);
-3. route each with OSRM concurrently (cached), rank by the speed-model ETA;
-4. corridor = signals within DIVERT_CORRIDOR_M of the route (ST_DWithin on GiST), then
-   precise along-route distance (haversine projection) and the lane advisory;
+2. the N nearest stations of the service with AVAILABLE units (PostGIS KNN), and the
+   city's active incidents (crowding zones, design §2);
+3. route each station with OSRM concurrently (cached): OSRM alternatives plus via-point
+   detours, candidates longer than 1.6 x the shortest dropped;
+4. per candidate: corridor = signals within DIVERT_CORRIDOR_M of the route (ST_DWithin on
+   GiST), every pass of it with its movement and lane advice (design §3); the ETA under the
+   traffic model (class-aware congestion + incident zones); junction delays and corridor
+   contention with the live emergency vehicles -> cost. Best route per station, then the
+   best station + route by cost; the choice is recorded as ``route_choice`` JSON;
 5. ONE transaction: lock a free unit (FOR UPDATE SKIP LOCKED, next-best station if none),
    insert incident + dispatch + timeline events + the outbox row holding the worker
    command, mark the unit DISPATCHED;
@@ -42,19 +47,23 @@ from divert.db.session import transaction
 from divert.domain.enums import (
     INCIDENT_TYPE_ALIASES,
     SERVICE_FOR_INCIDENT,
+    TRANSPORT_INCIDENT_STATUSES,
     IncidentStatus,
     IncidentType,
     ServiceType,
     normalize_incident_type,
 )
-from divert.domain.geo import LatLng, bearing_at_distance, project_onto_polyline
-from divert.domain.models import City, CorridorCandidate, StationCandidate
-from divert.domain.route import CorridorSignal, Route, lane_advisory
-from divert.metrics import DISPATCH_LATENCY, DISPATCHES
-from divert.services.eta import EtaModel, EtaQuery
+from divert.domain.geo import LatLng
+from divert.domain.models import City, IncidentZone, StationCandidate
+from divert.domain.route import CorridorSignal, Route
+from divert.metrics import DISPATCH_LATENCY, DISPATCHES, ROUTE_CANDIDATES
+from divert.services.corridor import build_corridor
+from divert.services.eta import EtaModel
 from divert.services.outbox import OutboxRelay
 from divert.services.reference import ReferenceCache
+from divert.services.route_choice import Candidate, Choice, choose, score_route, within_length
 from divert.services.routing import RoutingError
+from divert.services.traffic import ModelledTraffic
 from divert.store import redis_store as keys
 from divert.store.events import (
     OUTBOX_TOPIC_COMMANDS,
@@ -63,16 +72,20 @@ from divert.store.events import (
     message,
 )
 from divert.store.guard import RedisGuard
-from divert.store.live import read_sim_clock
+from divert.store.live import read_sim_clock, read_vehicles
 from divert.store.streams import dumps
 
 log = logging.getLogger(__name__)
 
-APPROACH_LOOKBACK_M = 5.0
+__all__ = ["DispatchService", "Router", "build_corridor"]
 
 
 class Router(Protocol):
     async def route(self, origin: LatLng, destination: LatLng) -> Route: ...
+
+    async def alternatives(self, origin: LatLng, destination: LatLng) -> list[Route]:
+        """Route candidates (OSRM alternatives + detours); never empty."""
+        ...
 
 
 class DispatchError(Exception):
@@ -105,6 +118,13 @@ class InvalidState(DispatchError):
     code = "invalid_state"
 
 
+class CannotCancelTransport(DispatchError):
+    """A patient is on board (TRANSPORTING) or being handed over (AT_HOSPITAL)."""
+
+    status_code = 409
+    code = "cannot_cancel_transport"
+
+
 class RoutingUnavailable(DispatchError):
     status_code = 503
     code = "routing_unavailable"
@@ -116,28 +136,29 @@ class Plan:
     route: Route
     corridor: tuple[CorridorSignal, ...]
     eta_s: float
+    choice: Choice | None = None
+
+    @property
+    def cost_s(self) -> float:
+        return self.choice.chosen.cost_s if self.choice is not None else self.eta_s
+
+    def route_choice(self) -> dict[str, Any] | None:
+        if self.choice is None:
+            return None
+        return {"station_id": self.candidate.station.id, **self.choice.to_json()}
 
 
-def build_corridor(route: Route, candidates: Sequence[CorridorCandidate]) -> list[CorridorSignal]:
-    """Precise along-route position, lane advisory and approach bearing per signal."""
-    out: list[CorridorSignal] = []
-    for c in candidates:
-        proj = project_onto_polyline(c.signal.pos, route.points, route.cumulative)
-        bearing = bearing_at_distance(
-            route.points, route.cumulative, max(0.0, proj.along_m - APPROACH_LOOKBACK_M)
-        )
-        out.append(
-            CorridorSignal(
-                signal_id=c.signal.id,
-                name=c.signal.name,
-                pos=c.signal.pos,
-                along_m=proj.along_m,
-                offset_m=proj.offset_m,
-                lane=lane_advisory(proj.along_m, route.maneuvers),
-                approach_bearing=bearing,
-            )
-        )
-    out.sort(key=lambda s: (s.along_m, s.signal_id))
+def contention_feed(vehicles: Sequence[dict[str, Any]]) -> list[tuple[str, str, float]]:
+    """(vehicle id, signal id, ETA s) of every live emergency vehicle's junctions ahead."""
+    out: list[tuple[str, str, float]] = []
+    for v in vehicles:
+        if not v.get("emergency", True) or v.get("status") != "EN_ROUTE":
+            continue
+        for key, eta in (v.get("signal_etas") or {}).items():
+            try:
+                out.append((str(v.get("id")), str(key).split("#", 1)[0], float(eta)))
+            except (TypeError, ValueError):
+                continue
     return out
 
 
@@ -154,6 +175,7 @@ def start_command(
     plan: Plan,
     now: datetime,
 ) -> dict[str, Any]:
+    """The worker's start command (also the outbox payload, so it is persisted in PG)."""
     return message(
         CommandType.START_DISPATCH.value,
         command_id=f"start:{dispatch_id.hex}",
@@ -165,10 +187,14 @@ def start_command(
         service=service.value,
         incident_type=incident_type,
         destination=[location.lat, location.lng],
+        station_pos=[plan.candidate.station.pos.lat, plan.candidate.station.pos.lng],
         route=plan.route.to_json(),
         corridor=[c.to_json() for c in plan.corridor],
         predicted_eta_s=round(plan.eta_s, 1),
         created_at=now.isoformat(),
+        emergency=True,
+        leg_kind="RESPONSE",
+        route_choice=plan.route_choice(),
     )
 
 
@@ -284,6 +310,45 @@ class DispatchService:
         DISPATCH_LATENCY.observe(time.perf_counter() - started)
         return result
 
+    async def _live_contention(self, city_id: str) -> list[tuple[str, str, float]]:
+        """Junction ETAs of the live emergency vehicles (empty when Redis is down)."""
+        try:
+            live = await self.guard.call(lambda: read_vehicles(self.redis, city_id))
+        except RedisError as exc:  # a scoring input only; never fail a dispatch on it
+            log.warning("live vehicles unavailable", extra={"city": city_id, "error": repr(exc)})
+            return []
+        return contention_feed(live)
+
+    async def _candidate(
+        self,
+        repo: ReferenceRepository,
+        index: int,
+        route: Route,
+        *,
+        city: City,
+        service: ServiceType,
+        sim_at: datetime,
+        traffic: ModelledTraffic,
+        others: Sequence[tuple[str, str, float]],
+    ) -> Candidate:
+        corridor = build_corridor(
+            route,
+            await repo.corridor_candidates(city.id, route.points, self.settings.corridor_m),
+            within_m=self.settings.corridor_m,
+            emergency=True,
+        )
+        return score_route(
+            index,
+            route,
+            corridor,
+            eta_model=self.eta_model,
+            city=city,
+            service=service,
+            at=sim_at,
+            traffic=traffic,
+            others=others,
+        )
+
     async def _plans(
         self, city: City, service: ServiceType, location: LatLng, sim_at: datetime
     ) -> list[Plan]:
@@ -297,37 +362,37 @@ class DispatchService:
                     f"no {service.value} unit is available in {city.name}",
                     {"service": service.value},
                 )
+            zones: list[IncidentZone] = await IncidentRepository(s).active_incident_zones(city.id)
+            traffic = ModelledTraffic(zones)
+            others = await self._live_contention(city.id)
             results = await asyncio.gather(
-                *(self.router.route(c.station.pos, location) for c in candidates),
+                *(self.router.alternatives(c.station.pos, location) for c in candidates),
                 return_exceptions=True,
             )
             plans: list[Plan] = []
             errors: list[str] = []
+            scored = 0
             for cand, res in zip(candidates, results, strict=True):
                 if isinstance(res, RoutingError):
                     errors.append(f"{cand.station.id}: {res}")
                     continue
                 if isinstance(res, BaseException):
                     raise res
-                corridor = build_corridor(
-                    res,
-                    await repo.corridor_candidates(city.id, res.points, self.settings.corridor_m),
-                )
-                eta = self.eta_model.estimate(
-                    EtaQuery(
-                        route=res,
-                        service=service,
-                        city=city,
-                        corridor=corridor,
-                        along_m=0.0,
-                        speed_mps=0.0,
-                        at=sim_at,
+                options = [
+                    await self._candidate(
+                        repo, i, res[i], city=city, service=service, sim_at=sim_at,
+                        traffic=traffic, others=others,
                     )
-                )
-                plans.append(Plan(cand, res, tuple(corridor), eta.to_destination_s))
+                    for i in within_length(res)
+                ]  # fmt: skip
+                scored += len(options)
+                choice = choose(options)
+                best = choice.chosen
+                plans.append(Plan(cand, best.route, best.corridor, best.eta_s, choice))
+        ROUTE_CANDIDATES.observe(scored)
         if not plans:
             raise RoutingUnavailable("routing service unavailable", {"errors": errors[:5]})
-        plans.sort(key=lambda p: (p.eta_s, p.candidate.distance_m, p.candidate.station.id))
+        plans.sort(key=lambda p: (p.cost_s, p.candidate.distance_m, p.candidate.station.id))
         return plans
 
     async def _dispatch(
@@ -388,6 +453,7 @@ class DispatchService:
                     corridor=[c.to_json() for c in plan.corridor],
                     now=now,
                     command=command,
+                    route_choice=plan.route_choice(),
                 )
             )
             incident = await IncidentRepository(s).get_incident(incident_id)
@@ -428,6 +494,7 @@ class DispatchService:
                 "eta_s": round(plan.eta_s, 1),
                 "eta_model": self.eta_model.name,
                 "corridor": [c.to_json() for c in plan.corridor],
+                "route_choice": plan.route_choice(),
             },
         }
 
@@ -441,10 +508,15 @@ class DispatchService:
             if inc is None:
                 raise NotFound(f"incident {incident_id} not found in {city_id}")
             status = IncidentStatus(inc.status)
-            if status is IncidentStatus.CANCELLED:
+            if status in TRANSPORT_INCIDENT_STATUSES:
+                raise CannotCancelTransport(
+                    "a patient is on board: the transport cannot be cancelled",
+                    {"status": status.value},
+                )
+            if status in (IncidentStatus.CANCELLED, IncidentStatus.RESOLVED):
                 body = await repo.get_incident(incident_id)
                 assert body is not None
-                return body  # idempotent
+                return body  # idempotent: the unit is returning (or back); nothing changes
             if is_terminal(status):
                 raise InvalidState(f"incident is already {status.value}", {"status": status.value})
             dispatch = await repo.active_dispatch(incident_id)

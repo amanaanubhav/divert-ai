@@ -15,6 +15,11 @@ PUBLIC_FIELDS = (
     "id", "dispatch_id", "incident_id", "service", "station_id", "incident_type", "status",
     "pos", "heading", "speed_mps", "eta_s", "predicted_eta_s", "along_m", "distance_m",
     "elapsed_s", "started_at", "destination", "claims", "preempted_passed",
+    "emergency", "leg_kind", "rank", "next_movement", "speed_advisory_mps",
+    # trip legs (design §5)
+    "phase", "leg", "destination_info", "planning", "plan_error", "incident_location", "home",
+    "hospital",
+    "dwell_s", "dwell_target_s", "trip_s", "reroutes",
 )  # fmt: skip
 
 

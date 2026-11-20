@@ -37,8 +37,14 @@ async def create_incident(body: IncidentCreate, city: CityDep, ctx: CtxDep) -> d
 @router.delete(
     "/cities/{city}/incidents/{incident_id}",
     dependencies=MUTATING,
-    summary="Cancel an incident (the worker recalls its vehicle)",
-    responses={404: {"description": "not found"}, 409: {"description": "already resolved/failed"}},
+    summary="Cancel an incident (the worker recalls its vehicle, which drives back)",
+    responses={
+        404: {"description": "not found"},
+        409: {
+            "description": "cannot_cancel_transport (patient on board: TRANSPORTING / "
+            "AT_HOSPITAL) or invalid_state (FAILED)"
+        },
+    },
 )
 async def cancel_incident(
     city: CityDep, ctx: CtxDep, incident_id: uuid.UUID = Path()
