@@ -614,6 +614,48 @@ def test_a_new_fire_zone_ahead_triggers_a_reroute_request(clock: Clock) -> None:
     assert v.reroute_pending is None
 
 
+@pytest.mark.parametrize("fire_during_dwell", [True, False])
+def test_a_fire_zone_created_during_the_dwell_reroutes_the_planned_transport(
+    clock: Clock, fire_during_dwell: bool
+) -> None:
+    """Stage 5 fix-3: the TRANSPORT route is chosen at the start of the scene dwell; a FIRE
+    zone that appears on it during the dwell is new to that route, so the leg's start
+    checks it (design §2 trigger (a)). A zone the planner already knew is not re-checked."""
+    eng = engine(scene_time_s=120.0)
+    v = start(eng, clock, straight_route(C, bearing=90.0, n=10))
+    out = Out()
+    scene = v.incident_pos
+    assert scene is not None
+    fire = destination_point(scene, 0.0, 500.0)  # on the stub TRANSPORT route (800 m north)
+
+    def dispatch_fire() -> None:
+        fire_route = route_through([destination_point(fire, 90.0, 300.0), fire])
+        start(eng, clock, fire_route, incident_type="FIRE", service=ServiceType.FIRE_ENGINE,
+              vehicle_id="FIRE-1")  # fmt: skip
+
+    if not fire_during_dwell:
+        dispatch_fire()  # known when the TRANSPORT is planned
+    until(eng, clock, out, lambda: v.ready is not None, answer=stub_answer(None))
+    assert v.leg_kind is LegKind.RESPONSE
+    assert v.dwell_s < v.dwell_target_s
+    if fire_during_dwell:
+        dispatch_fire()  # after the TRANSPORT was planned, before it starts
+    until(eng, clock, out, lambda: v.leg_kind is LegKind.TRANSPORT, answer=stub_answer(None))
+    step(eng, clock, out, ticks=4, answer=stub_answer(None))
+    reqs = [
+        r for r in out.requests if r["type"] == "reroute_request" and r["vehicle_id"] == "AMB-1"
+    ]
+    if not fire_during_dwell:
+        assert reqs == []
+        return
+    assert [(r["kind"], r["seq"], r["reroute_no"], r["reason"]) for r in reqs] == [
+        ("TRANSPORT", 1, 1, "fire incident on the route"),
+    ]  # fmt: skip
+    eng.reroute_answered(v.dispatch_id, 1, 1)  # kept: the hysteresis is the planner's
+    assert v.reroute_pending is None
+    assert v.reroutes == 0
+
+
 def test_running_late_triggers_a_reroute_but_never_more_than_two(clock: Clock) -> None:
     eng = engine(scene_time_s=5.0)
     route = straight_route(C, bearing=90.0, n=80)  # 4 km

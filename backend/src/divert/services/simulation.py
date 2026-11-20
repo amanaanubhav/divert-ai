@@ -1205,6 +1205,7 @@ class SimulationEngine:
             origin=origin,
             requested_t=self._sim_t,
             start_at=self._sim_t + max(0.0, start_in_s),
+            zones_known=tuple(z.incident_id for z in self.traffic(v.city_id).zones),
         )
         v.next_seq += 1
         return p
@@ -1300,6 +1301,7 @@ class SimulationEngine:
         """Begin a planned leg at the vehicle's position (the plan's origin)."""
         sim = datetime.fromtimestamp(self._sim_t, UTC) if self._sim_t else wall
         scene_s = v.stopped_s  # (before the leg fields are reset)
+        known = None if v.pending is None else v.pending.zones_known
         self._release_all(v, wall, reason="leg_changed")  # (none held between legs)
         v.set_leg_route(plan.route, plan.corridor)
         v.leg_seq, v.leg_kind, v.emergency = plan.seq, plan.kind, plan.emergency
@@ -1319,7 +1321,11 @@ class SimulationEngine:
         v.dwell_s = v.dwell_target_s = 0.0
         v.pending, v.ready = None, None
         v.reroutes, v.reroute_pending, v.reroute_after_t = 0, None, -math.inf
-        v.zones_seen = {z.incident_id for z in self.traffic(v.city_id).zones}
+        # the route was chosen when the leg was planned (at the start of the dwell): a zone
+        # that appeared since is still "new" and checked against it (design §2 trigger (a))
+        v.zones_seen = (
+            {z.incident_id for z in self.traffic(v.city_id).zones} if known is None else set(known)
+        )
         v.leg_started_trip_s = v.trip_s
         if plan.kind is LegKind.TRANSPORT:
             v.phase = UnitStatus.TRANSPORTING

@@ -9,7 +9,8 @@ from typing import Any, cast
 import pytest
 
 from divert.config import Settings
-from divert.domain.enums import DestinationKind, LegKind, ServiceType
+from divert.db.repositories.legs import eta_error_pct
+from divert.domain.enums import DestinationKind, LegEndReason, LegKind, ServiceType
 from divert.domain.geo import LatLng, destination_point, haversine_m
 from divert.domain.hospitals import (
     HospitalOption,
@@ -223,8 +224,10 @@ def test_leg_planned_command_round_trips_into_a_leg_plan() -> None:
 
 
 def test_pending_leg_json_round_trip() -> None:
-    p = PendingLeg(2, LegKind.RETURN, C, requested_t=10.0, start_at=30.0, attempts=3, error="x")
+    p = PendingLeg(2, LegKind.RETURN, C, requested_t=10.0, start_at=30.0, attempts=3, error="x",
+                   zones_known=("fire-1",))  # fmt: skip
     assert PendingLeg.from_json(p.to_json()) == p
+    assert PendingLeg.from_json({**p.to_json(), "zones_known": None}).zones_known is None
 
 
 def test_is_home_within_30_m() -> None:
@@ -378,3 +381,22 @@ async def test_other_planning_errors_still_retry() -> None:
     assert view.not_needed == []
     assert len(view.failed) == 3
     assert all(f.startswith("routing:") for f in view.failed)
+
+
+@pytest.mark.parametrize(
+    ("end_reason", "expected"),
+    [
+        (LegEndReason.ARRIVED, -202.7),
+        (LegEndReason.CANCELLED, None),
+        (LegEndReason.SUPERSEDED, None),
+        (LegEndReason.FAILED, None),
+        (None, None),  # still being driven
+    ],
+)
+def test_eta_error_is_null_unless_the_leg_arrived(
+    end_reason: LegEndReason | None, expected: float | None
+) -> None:
+    # the live case: a RESPONSE predicted 145 s, cancelled 47.9 s in -> no "-202 %"
+    assert eta_error_pct(145.0, 47.9, end_reason) == expected
+    assert eta_error_pct(145.0, None, LegEndReason.ARRIVED) is None
+    assert eta_error_pct(145.0, 0.0, LegEndReason.ARRIVED) is None

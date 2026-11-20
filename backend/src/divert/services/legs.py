@@ -68,6 +68,10 @@ class PendingLeg:
     start_at: float  # sim epoch the leg is expected to start (end of the dwell)
     attempts: int = 0  # failed planning attempts so far (leg_plan_failed)
     error: str | None = None  # last planning error (shown as "planning route (retrying)")
+    # incident zones that existed when the leg was requested (the planner chose its route
+    # with them): any other zone is checked against the route once the leg starts (design
+    # §2 trigger (a)); None = unknown (an older live document) -> the zones at the start
+    zones_known: tuple[str, ...] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -78,6 +82,7 @@ class PendingLeg:
             "start_at": round(self.start_at, 3),
             "attempts": self.attempts,
             "error": self.error,
+            "zones_known": None if self.zones_known is None else list(self.zones_known),
         }
 
     @classmethod
@@ -90,6 +95,7 @@ class PendingLeg:
             start_at=float(d.get("start_at", d.get("requested_t", 0.0))),
             attempts=int(d.get("attempts", 0)),
             error=d.get("error"),
+            zones_known=None if d.get("zones_known") is None else tuple(d["zones_known"]),
         )
 
 
