@@ -2,10 +2,13 @@
 
 Speed limit at a point of the route:
 
-* segment cap  = min(vehicle max, OSRM segment speed x city congestion factor (local hour)
-  x emergency advantage 1.3);
-* junction cap = 35 km/h through a junction pre-empted *for this vehicle*, 15 km/h through
-  any other signalised junction on the route (red, or green for a competing vehicle);
+* segment cap  = min(vehicle max, OSRM segment speed x traffic factor of the segment
+  (class-aware congestion x incident zones, :mod:`divert.services.traffic`) x emergency
+  advantage 1.3 - emergency legs only);
+* junction cap = 35 km/h through a junction pre-empted *for this vehicle* (or a free
+  left), 15 km/h through any other signalised junction on the route; 0 at a stop line
+  where the vehicle must wait for green (red for a non-emergency vehicle, or a queued
+  emergency claimant whose speed advisory cannot make the green);
 * the route end is a stop (arrival crawl speed).
 
 A backward pass turns the point caps into a braking envelope (deceleration 3.0 m/s^2),
@@ -50,11 +53,15 @@ PROFILES: Final[dict[ServiceType, VehicleProfile]] = {
 }
 
 
-def segment_cap_mps(osrm_speed_mps: float, congestion: float, profile: VehicleProfile) -> float:
+type Factors = float | Sequence[float]  # one traffic factor, or one per segment
+
+
+def segment_cap_mps(
+    osrm_speed_mps: float, factor: float, profile: VehicleProfile, *, emergency: bool = True
+) -> float:
     base = max(MIN_SEGMENT_SPEED_MPS, osrm_speed_mps)
-    return max(
-        MIN_SEGMENT_SPEED_MPS, min(profile.max_speed_mps, base * congestion * EMERGENCY_ADVANTAGE)
-    )
+    boost = EMERGENCY_ADVANTAGE if emergency else 1.0
+    return max(MIN_SEGMENT_SPEED_MPS, min(profile.max_speed_mps, base * factor * boost))
 
 
 def junction_cap_mps(preempted_for_vehicle: bool) -> float:
@@ -144,11 +151,18 @@ class SpeedProfile:
             v = min(v, self._limit[k])
         return v
 
-    def step(self, along_m: float, speed_mps: float, dt_s: float) -> tuple[float, float]:
-        """Advance one simulation step; returns (along_m, speed_mps)."""
-        a = self.profile.accel_mps2
+    def step(
+        self, along_m: float, speed_mps: float, dt_s: float, *, cap_mps: float | None = None
+    ) -> tuple[float, float]:
+        """Advance one simulation step; returns (along_m, speed_mps).
+
+        ``cap_mps``: a speed advisory - slow toward it at no more than the braking rate.
+        """
+        a, b = self.profile.accel_mps2, self.profile.brake_mps2
         v1 = min(speed_mps + a * dt_s, self.allowed_speed(along_m))
-        x1 = min(self.total_m, along_m + 0.5 * (speed_mps + v1) * dt_s)
+        if cap_mps is not None:
+            v1 = min(v1, max(cap_mps, speed_mps - b * dt_s))
+        x1 = min(self.total_m, along_m + 0.5 * (speed_mps + max(0.0, v1)) * dt_s)
         v1 = min(v1, self.allowed_speed(x1))
         return x1, max(0.0, v1)
 
@@ -200,15 +214,20 @@ class SpeedProfile:
 def build_profile(
     route: Route,
     service: ServiceType,
-    congestion: float,
-    junctions: Sequence[tuple[float, bool]],
+    factors: Factors,
+    junction_caps: Sequence[tuple[float, float]],
+    *,
+    emergency: bool = True,
 ) -> SpeedProfile:
-    """``junctions``: (along_m, preempted_for_this_vehicle) for each corridor signal ahead."""
+    """``factors``: traffic factor(s) per segment; ``junction_caps``: (along_m, cap m/s)
+    point caps - junctions (:func:`junction_cap_mps`) and stop lines (0)."""
     prof = PROFILES[service]
-    caps = [segment_cap_mps(s, congestion, prof) for s in route.segment_speeds_mps]
-    return SpeedProfile(
-        route.cumulative,
-        caps,
-        [(along, junction_cap_mps(pre)) for along, pre in junctions],
-        prof,
-    )
+    n = len(route.segment_speeds_mps)
+    per_seg = [float(factors)] * n if isinstance(factors, int | float) else list(factors)
+    if len(per_seg) != n:
+        raise ValueError("need one traffic factor per segment")
+    caps = [
+        segment_cap_mps(s, f, prof, emergency=emergency)
+        for s, f in zip(route.segment_speeds_mps, per_seg, strict=True)
+    ]
+    return SpeedProfile(route.cumulative, caps, junction_caps, prof)
