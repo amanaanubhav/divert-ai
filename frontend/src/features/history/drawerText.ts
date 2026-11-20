@@ -31,10 +31,12 @@ export function tripTimes(
   return { responseS, callToHospitalS }
 }
 
-/** (actual - predicted) / actual x 100, as the backend computes `eta_error_pct`. */
+/** (actual - predicted) / actual x 100, as the backend computes `eta_error_pct`: only for
+ * a leg that arrived (a cancelled, failed or superseded leg has no meaningful error). */
 export function legErrorPct(
-  l: Pick<LegRecord, 'predicted_eta_s' | 'actual_travel_s' | 'eta_error_pct'>,
+  l: Pick<LegRecord, 'predicted_eta_s' | 'actual_travel_s' | 'eta_error_pct' | 'end_reason'>,
 ): number | null {
+  if (l.end_reason != null && l.end_reason !== 'ARRIVED') return null
   if (l.eta_error_pct != null) return l.eta_error_pct
   if (l.actual_travel_s == null || l.actual_travel_s <= 0) return null
   return (100 * (l.actual_travel_s - l.predicted_eta_s)) / l.actual_travel_s

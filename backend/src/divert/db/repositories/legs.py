@@ -115,7 +115,9 @@ class LegRow:
             "actual_travel_s": None
             if self.actual_travel_s is None
             else round(self.actual_travel_s, 1),
-            "eta_error_pct": eta_error_pct(self.predicted_eta_s, self.actual_travel_s),
+            "eta_error_pct": eta_error_pct(
+                self.predicted_eta_s, self.actual_travel_s, self.end_reason
+            ),
             "corridor": self.corridor,
             "route_choice": self.route_choice,
             "hospital_choice": self.hospital_choice,
@@ -130,9 +132,13 @@ class LegRow:
         }
 
 
-def eta_error_pct(predicted: float, actual: float | None) -> float | None:
-    """(actual - predicted) / actual in percent (the +-10 % guarantee is on this)."""
-    if actual is None or actual <= 0:
+def eta_error_pct(
+    predicted: float, actual: float | None, end_reason: LegEndReason | None
+) -> float | None:
+    """(actual - predicted) / actual in percent (the +-10 % guarantee is on this); null
+    unless the leg ARRIVED - a cancelled / failed / superseded leg stopped short of its
+    destination, so its error is meaningless (stage 5 fix-3)."""
+    if end_reason is not LegEndReason.ARRIVED or actual is None or actual <= 0:
         return None
     return round(100.0 * (actual - predicted) / actual, 1)
 

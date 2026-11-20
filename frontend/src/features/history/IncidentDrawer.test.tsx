@@ -88,11 +88,39 @@ describe('IncidentDrawer with trip legs', () => {
 describe('drawer helpers', () => {
   it('computes per-leg errors like the backend and trip times in simulated seconds', () => {
     expect(
-      legErrorPct({ predicted_eta_s: 73.4, actual_travel_s: 75, eta_error_pct: null }),
+      legErrorPct({
+        predicted_eta_s: 73.4,
+        actual_travel_s: 75,
+        eta_error_pct: null,
+        end_reason: null,
+      }),
     ).toBeCloseTo(2.13, 2)
     expect(
-      legErrorPct({ predicted_eta_s: 1, actual_travel_s: null, eta_error_pct: null }),
+      legErrorPct({
+        predicted_eta_s: 1,
+        actual_travel_s: null,
+        eta_error_pct: null,
+        end_reason: null,
+      }),
     ).toBeNull()
+    // a cancelled leg stopped short: no error (the drawer shows "–"), never a recomputed -202 %
+    for (const end_reason of ['CANCELLED', 'FAILED', 'SUPERSEDED'] as const)
+      expect(
+        legErrorPct({
+          predicted_eta_s: 145,
+          actual_travel_s: 47.9,
+          eta_error_pct: null,
+          end_reason,
+        }),
+      ).toBeNull()
+    expect(
+      legErrorPct({
+        predicted_eta_s: 145,
+        actual_travel_s: 47.9,
+        eta_error_pct: -202.7,
+        end_reason: 'ARRIVED',
+      }),
+    ).toBe(-202.7)
     const d = medicalDetail()
     expect(tripTimes(d, drawableLegs(d))).toEqual({ responseS: 152, callToHospitalS: 895 })
   })
