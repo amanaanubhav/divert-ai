@@ -345,6 +345,108 @@ def test_patient_taken_to_the_units_own_hospital_needs_no_return_leg(clock: Cloc
     assert [types.index(t) for t in order] == sorted(types.index(t) for t in order)
 
 
+# A station mapped off the road (stage 5 fix F1): real Vimhans gap between the OSM point
+# and the road point OSRM snaps it to (35.8 m > AT_HOME_M).
+OFF_ROAD_M = 35.8
+
+
+def _off_road_station(route: Any) -> list[float]:
+    p = destination_point(route.origin, 270.0, OFF_ROAD_M)
+    return [p.lat, p.lng]
+
+
+def _to_road_point(road: Any) -> Answer:
+    """TRANSPORT to the unit's own hospital: the route ends at the hospital's road point
+    (where OSRM snaps it), as every route to it does - not at its OSM point."""
+
+    def answer(req: dict[str, Any]) -> dict[str, Any] | None:
+        if req["kind"] != "TRANSPORT":
+            return None
+        cmd = stub_leg_command({**req, "kind": "RETURN", "home": [road.lat, road.lng]})
+        return {**cmd, "kind": "TRANSPORT", "emergency": True}
+
+    return answer
+
+
+def test_a_station_mapped_off_the_road_is_home_at_its_road_point(clock: Clock) -> None:
+    eng = engine(scene_time_s=5.0, hospital_handover_s=10.0)
+    route = straight_route(C, n=12)
+    cmd = start_cmd(route)
+    cmd["station_pos"] = _off_road_station(route)
+    v = eng.start_dispatch(cmd, stream_id=None, wall=clock.now, sim=clock.now)
+    assert v is not None
+    assert v.home_road == route.origin  # the RESPONSE route starts at the road point
+    assert haversine_m(route.origin, v.home or route.origin) > 30.0
+    out = Out()
+    until(eng, clock, out, gone(eng), answer=_to_road_point(route.origin))
+    assert [r["kind"] for r in out.requests if r["type"] == "plan_request"] == ["TRANSPORT"]
+    assert [(e["seq"], e["kind"]) for e in out.of("leg_ended")] == [
+        (0, "RESPONSE"), (1, "TRANSPORT"),
+    ]  # fmt: skip
+    assert out.of("leg_plan_failed") == []
+    assert out.of("back_in_service")[0]["end_reason"] == "CLEARED"
+
+
+def test_return_found_to_have_no_length_brings_the_unit_back_in_service(clock: Clock) -> None:
+    """A vehicle whose road point is unknown (restored from a live document written before
+    it was kept) asks for the RETURN; the planner finds origin and station snap to the
+    same road point and says so: no leg, back in service at the end of the handover."""
+    eng = engine(scene_time_s=5.0, hospital_handover_s=10.0)
+    route = straight_route(C, n=12)
+    cmd = start_cmd(route)
+    cmd["station_pos"] = _off_road_station(route)
+    v = eng.start_dispatch(cmd, stream_id=None, wall=clock.now, sim=clock.now)
+    assert v is not None
+    v.home_road = None
+    out = Out()
+    until(eng, clock, out, lambda: v.pending is not None and v.pending.kind is LegKind.RETURN,
+          answer=_to_road_point(route.origin))  # fmt: skip
+    p = v.pending
+    assert p is not None
+    assert not eng.leg_not_needed(v.dispatch_id, p.seq + 1)  # not the pending request
+    assert not eng.leg_not_needed("no-such-dispatch", p.seq)
+    assert eng.leg_not_needed(v.dispatch_id, p.seq)
+    assert v.pending is None
+    assert v.home_road == v.pos
+    assert v.live_json()["home_road"] == [round(v.pos.lat, 7), round(v.pos.lng, 7)]
+    assert not eng.leg_not_needed(v.dispatch_id, p.seq)  # applied once
+    until(eng, clock, out, gone(eng))
+    assert [(e["seq"], e["kind"]) for e in out.of("leg_ended")] == [
+        (0, "RESPONSE"), (1, "TRANSPORT"),
+    ]  # fmt: skip
+    types = out.types()
+    order = ["handover_complete", "returning", "back_in_service"]
+    assert [types.index(t) for t in order] == sorted(types.index(t) for t in order)
+
+
+def test_a_transport_is_never_dropped_as_not_needed(clock: Clock) -> None:
+    eng = engine(scene_time_s=5.0)
+    route = straight_route(C, n=6)
+    v = start(eng, clock, route)
+    out = Out()
+    until(eng, clock, out, lambda: v.pending is not None)
+    assert v.pending is not None
+    assert v.pending.kind is LegKind.TRANSPORT
+    assert not eng.leg_not_needed(v.dispatch_id, v.pending.seq)
+    assert v.pending is not None
+
+
+def test_the_road_point_survives_a_restore(clock: Clock) -> None:
+    eng = engine()
+    route = straight_route(C, n=6)
+    cmd = start_cmd(route)
+    cmd["station_pos"] = _off_road_station(route)
+    v = eng.start_dispatch(cmd, stream_id=None, wall=clock.now, sim=clock.now)
+    assert v is not None
+    back = Vehicle.restore(v.live_json(), v.route_json(), {})
+    assert back.home_road is not None
+    assert haversine_m(back.home_road, route.origin) < 0.01
+    legacy = {k: val for k, val in v.live_json().items() if k != "home_road"}
+    assert Vehicle.restore(legacy, v.route_json(), {}).home_road == route.origin  # RESPONSE
+    on_transport = {**legacy, "leg": {"seq": 1, "kind": "TRANSPORT", "emergency": True}}
+    assert Vehicle.restore(on_transport, v.route_json(), {}).home_road is None  # unknown
+
+
 # ------------------------------------------------------------------------ re-route
 
 

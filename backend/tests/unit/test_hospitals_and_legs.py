@@ -4,11 +4,13 @@ pure helpers."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
+from divert.config import Settings
 from divert.domain.enums import DestinationKind, LegKind, ServiceType
-from divert.domain.geo import destination_point, haversine_m
+from divert.domain.geo import LatLng, destination_point, haversine_m
 from divert.domain.hospitals import (
     HospitalOption,
     choose_hospital,
@@ -27,7 +29,8 @@ from divert.services.legs import (
     reroute_origin_m,
     splice,
 )
-from divert.services.planner import PlanRequest, backoff_s
+from divert.services.planner import LegPlanner, PlanRequest, backoff_s
+from divert.services.routing import SAME_POINT, RoutingError
 from tests.support import city, corridor_at, route_through, straight_route
 
 C = city("delhi").center
@@ -158,6 +161,22 @@ def test_is_home_within_30_m() -> None:
     assert not is_home(C, destination_point(C, 90.0, AT_HOME_M + 1.0))
 
 
+# Real data (stage 5 fix F1): Vimhans (station Hw168898336, OSM point) and the point public
+# OSRM snaps it to - where the e2e TRANSPORT to Vimhans ended (dispatch_legs route end).
+VIMHANS = LatLng(28.567979, 77.251595)
+VIMHANS_ROAD = LatLng(28.567703, 77.251405)
+
+
+def test_a_station_mapped_off_the_road_is_home_at_its_road_point() -> None:
+    assert haversine_m(VIMHANS, VIMHANS_ROAD) > AT_HOME_M  # 35.8 m: the OSM point alone fails
+    assert not is_home(VIMHANS_ROAD, VIMHANS)
+    assert is_home(VIMHANS_ROAD, VIMHANS, VIMHANS_ROAD)
+    assert is_home(destination_point(VIMHANS_ROAD, 120.0, AT_HOME_M - 1.0), VIMHANS, VIMHANS_ROAD)
+    far = destination_point(VIMHANS_ROAD, 120.0, AT_HOME_M + 1.0)
+    assert haversine_m(far, VIMHANS) > AT_HOME_M
+    assert not is_home(far, VIMHANS, VIMHANS_ROAD)
+
+
 # ----------------------------------------------------------------------- re-route
 
 
@@ -216,3 +235,75 @@ def test_plan_request_parses_the_engine_message() -> None:
     assert req.key == ("d", 1)
     assert req.kind is LegKind.TRANSPORT
     assert req.start_at == 5.0
+
+
+class _View:
+    """The planner's window on the engine: records what the planner tells it."""
+
+    def __init__(self) -> None:
+        self.failed: list[str] = []
+        self.not_needed: list[tuple[str, int]] = []
+        self.waiting = True
+
+    def wants(self, dispatch_id: str, seq: int) -> bool:
+        return self.waiting
+
+    def plan_failed(self, dispatch_id: str, seq: int, error: str) -> bool:
+        self.failed.append(error)
+        self.waiting = len(self.failed) < 3  # stop the retry loop after three failures
+        return True
+
+    def leg_not_needed(self, dispatch_id: str, seq: int) -> bool:
+        self.not_needed.append((dispatch_id, seq))
+        self.waiting = False
+        return True
+
+
+def _planner(view: _View, error: Exception) -> LegPlanner:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    planner = LegPlanner(
+        settings=Settings(),
+        sessionmaker=cast(Any, None),
+        redis=cast(Any, None),
+        router=cast(Any, None),
+        view=cast(Any, view),
+        outbox=cast(Any, object()),
+        sleep=no_sleep,
+    )
+
+    async def plan(_: PlanRequest) -> dict[str, Any]:
+        raise error
+
+    planner.plan = plan  # type: ignore[method-assign]
+    return planner
+
+
+def _request(kind: LegKind) -> PlanRequest:
+    return PlanRequest(
+        "delhi", "d", "i", "AMB-1", ServiceType.AMBULANCE, "Hw168898336", 2, kind,
+        origin=VIMHANS_ROAD, home=VIMHANS, start_at=0.0,
+    )  # fmt: skip
+
+
+async def test_a_return_that_snaps_to_the_station_is_not_needed_and_never_retried() -> None:
+    view = _View()
+    same = RoutingError("OSRM: origin and destination snap to the same road point", kind=SAME_POINT)
+    await _planner(view, same)._plan_with_retries(_request(LegKind.RETURN))
+    assert view.not_needed == [("d", 2)]
+    assert view.failed == []  # no leg_plan_failed: nothing failed, the unit is home
+
+
+async def test_other_planning_errors_still_retry() -> None:
+    view = _View()
+    same = RoutingError("OSRM: origin and destination snap to the same road point", kind=SAME_POINT)
+    await _planner(view, same)._plan_with_retries(_request(LegKind.TRANSPORT))
+    assert view.not_needed == []  # a TRANSPORT is never "home"
+    assert len(view.failed) == 3
+    view = _View()
+    down = RoutingError("OSRM unavailable", kind="unavailable")
+    await _planner(view, down)._plan_with_retries(_request(LegKind.RETURN))
+    assert view.not_needed == []
+    assert len(view.failed) == 3
+    assert all(f.startswith("routing:") for f in view.failed)

@@ -35,13 +35,22 @@ SPLICE_MARGIN_M: Final = 5.0  # a vehicle this close to the re-route point is to
 REROUTE_ZONE_TYPES: Final = frozenset({"FIRE", "CRIME"})
 # A unit that ends a leg this close to its own station is home: no RETURN leg is planned
 # (e.g. a hospital ambulance that took the patient to its own ED). Assumption: a station
-# forecourt / hospital campus entrance is within 30 m of its OSM point.
+# forecourt / hospital campus entrance is within 30 m of its OSM point - or of its road
+# point (where OSRM snaps the station; see is_home).
 AT_HOME_M: Final = 30.0
 
 
-def is_home(pos: LatLng, home: LatLng) -> bool:
-    """The unit is at its own station: a RETURN leg would have no length."""
-    return haversine_m(pos, home) <= AT_HOME_M
+def is_home(pos: LatLng, home: LatLng, home_road: LatLng | None = None) -> bool:
+    """The unit is at its own station: a RETURN leg would have no length.
+
+    ``home`` is the station's OSM point; ``home_road`` its road point - where OSRM snaps
+    the station, i.e. the first point of the unit's RESPONSE route. A station mapped
+    more than AT_HOME_M off the road (a hospital campus) is only ever reached at its road
+    point: every leg to it ends there, and a RETURN from there has no length.
+    """
+    if haversine_m(pos, home) <= AT_HOME_M:
+        return True
+    return home_road is not None and haversine_m(pos, home_road) <= AT_HOME_M
 
 
 def _ll(raw: Any) -> LatLng:

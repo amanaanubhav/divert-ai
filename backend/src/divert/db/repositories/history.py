@@ -44,6 +44,7 @@ from divert.domain.enums import (
     IncidentStatus,
     Lane,
     LegEndReason,
+    LegKind,
     Movement,
     PhaseStateAtClaim,
     PreemptOutcome,
@@ -573,6 +574,16 @@ class ActiveDispatch:
         """The last leg that started (RESPONSE until another one starts)."""
         started = [leg for leg in self.legs if leg.started_at is not None]
         return max(started, key=lambda leg: leg.seq) if started else None
+
+    @property
+    def home_road(self) -> LatLng | None:
+        """The station's road point: where the RESPONSE route starts (OSRM's snap of the
+        station; legs ending there are home even when the OSM point is off the road)."""
+        response = [leg for leg in self.legs if leg.kind is LegKind.RESPONSE and leg.route_points]
+        if not response:
+            return None
+        lat, lng = min(response, key=lambda leg: leg.seq).route_points[0]
+        return LatLng(float(lat), float(lng))
 
 
 async def active_dispatches(session: AsyncSession, city_ids: Sequence[str]) -> list[ActiveDispatch]:

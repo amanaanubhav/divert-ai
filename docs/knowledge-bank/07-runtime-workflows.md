@@ -307,7 +307,11 @@ sequenceDiagram
 4. **Request.** `_request_leg` fixes the next `seq`, stores it as the vehicle's `pending`
    leg (in its live JSON, so a new leader re-issues it) and puts a `plan_request` in the
    batch; the worker hands it to the planner after the write (`Worker._flush`). A RETURN
-   from within 30 m of the unit's own station is not requested: it is home.
+   from within 30 m of the unit's own station is not requested: it is home. The station is
+   its OSM point or its road point (`home_road`, where the RESPONSE route started). If OSRM
+   still answers a RETURN with zero length (`RoutingError` kind `same_point`), the planner
+   calls `leg_not_needed`, which drops the request instead of retrying it, and the unit is
+   back in service when its dwell ends.
 5. **Dwell.** Each tick adds `dt_sim`. When it is over, `_dwell_done` (guarded, once):
    scene -> `cleared` + incident RESOLVED (FIRE / CRIME); hospital -> `handover_complete`
    + RESOLVED (MEDICAL); then `_release_unit`: phase RETURNING, `returning` event (unit
@@ -542,7 +546,8 @@ flowchart TD
    cancel), dwell resumed (wall time since `ended_at` x scale, capped at the target), phase
    AT_HOSPITAL for an arrived TRANSPORT leg, and `pending` = the next leg: the already
    planned, not started row of that kind (same seq: the planner re-sends it) or a new seq;
-   none when it is within 30 m of its station.
+   none when it is within 30 m of its station. The station is its OSM point or its road
+   point, `ActiveDispatch.home_road`: the start of the RESPONSE leg's route.
 6. **Announce** (`SimulationEngine.restore(v, announce_at=wall)`) and, after the drain,
    `take_over` hands `pending_plan_requests()` to the new planner.
 7. **On failure** (`ValueError`, `KeyError`): a `failed` event with `reason` =

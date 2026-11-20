@@ -169,6 +169,11 @@ class EngineView:
     def plan_failed(self, dispatch_id: str, seq: int, error: str) -> bool:
         return self.engine.plan_failed(dispatch_id, seq, error, wall=self.worker.wall_clock())
 
+    def leg_not_needed(self, dispatch_id: str, seq: int) -> bool:
+        if self.worker.engine is not self.engine:
+            return False
+        return self.engine.leg_not_needed(dispatch_id, seq)
+
     def reroute_answered(self, dispatch_id: str, seq: int, reroute_no: int) -> None:
         self.engine.reroute_answered(dispatch_id, seq, reroute_no)
 
@@ -428,6 +433,7 @@ class Worker:
             leg_kind=leg.kind,
             incident_pos=row.scene,
             home=row.home,
+            home_road=row.home_road,
         )
         v.leg_seq = leg.seq
         v.next_seq = max(lg.seq for lg in row.legs) + 1
@@ -515,7 +521,7 @@ class Worker:
         else:
             seq = v.next_seq
             origin = leg.destination if arrived else (row.last_pos or v.pos)
-            if kind is LegKind.RETURN and is_home(origin, row.home):
+            if kind is LegKind.RETURN and is_home(origin, row.home, row.home_road):
                 return  # at its own station: back in service when the dwell ends
         v.next_seq = max(v.next_seq, seq + 1)
         t = self.sim_now.timestamp()

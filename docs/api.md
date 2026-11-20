@@ -202,7 +202,8 @@ the traffic at that time; the vehicle dwells meanwhile (scene time per service,
 the vehicle waits in place (`planning: true`); routing failures are retried with backoff
 (`plan_error`), never replaced by a straight line. A unit that ends a leg within 30 m of its
 own station (e.g. the patient was taken to the ambulance's own hospital) needs no RETURN
-leg: it is back in service when the dwell ends.
+leg: it is back in service when the dwell ends. "Its station" is the station's OSM point or
+its road point (where its RESPONSE route started), so a hospital mapped off the road counts.
 
 Statuses: unit `AVAILABLE -> DISPATCHED -> ON_SCENE -> [TRANSPORTING -> AT_HOSPITAL] ->
 RETURNING -> AVAILABLE` (+ `OUT_OF_SERVICE`); incident `DISPATCHED -> EN_ROUTE -> ON_SCENE ->

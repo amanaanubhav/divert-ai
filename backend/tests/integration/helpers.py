@@ -17,11 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from divert.cities.loader import load_snapshot
 from divert.config import Settings
-from divert.domain.geo import LatLng, haversine_m
+from divert.domain.enums import ServiceType
+from divert.domain.geo import LatLng, destination_point, haversine_m
 from divert.domain.route import Route
 from divert.main import create_app
 from divert.persister import Persister
-from divert.services.routing import RoutingError
+from divert.services.routing import RoutingError, parse_osrm_routes
 from divert.worker import Worker
 from tests.support import route_through
 
@@ -41,6 +42,39 @@ class StubRouter:
 
     async def alternatives(self, origin: LatLng, destination: LatLng) -> list[Route]:
         return [await self.route(origin, destination)]
+
+
+class SnappingRouter(StubRouter):
+    """:class:`StubRouter` that, like OSRM, snaps points to the road first: every hospital
+    of the city is mapped ``off_road_m`` west of the road (its road point is that far east
+    of its OSM point). A request whose ends snap to the same road point gets OSRM's
+    zero-length answer (``RoutingError`` kind ``same_point``, via the real parser)."""
+
+    def __init__(self, city_id: str, *, off_road_m: float = 40.0) -> None:
+        super().__init__()
+        self.road = {
+            st.pos: destination_point(st.pos, 90.0, off_road_m)
+            for st in load_snapshot(city_id).stations
+            if st.service is ServiceType.AMBULANCE
+        }
+        self.same_point = 0
+
+    def snap(self, p: LatLng) -> LatLng:
+        near = [road for osm, road in self.road.items() if haversine_m(p, osm) < 1.0]
+        return near[0] if near else p
+
+    async def route(self, origin: LatLng, destination: LatLng) -> Route:
+        a, b = self.snap(origin), self.snap(destination)
+        if haversine_m(a, b) < 0.01:
+            self.calls += 1
+            self.same_point += 1
+            here = [a.lng, a.lat]
+            leg = {"annotation": {"distance": [0], "duration": [0.1], "speed": [0]}, "steps": []}
+            geometry = {"type": "LineString", "coordinates": [here, here]}
+            body = {"code": "Ok", "routes": [{"distance": 0, "duration": 0.1, "geometry": geometry,
+                                              "legs": [leg]}]}  # fmt: skip
+            return parse_osrm_routes(body)[0]  # raises: a Route needs two distinct points
+        return await super().route(a, b)
 
 
 def signal_near_center(city_id: str) -> LatLng:

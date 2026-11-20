@@ -71,7 +71,7 @@ from divert.services.outbox import OutboxRelay
 from divert.services.outbox import publish as outbox_publish
 from divert.services.preemption import PreemptionRules
 from divert.services.route_choice import Candidate, Choice, choose, score_route, within_length
-from divert.services.routing import RoutingError
+from divert.services.routing import SAME_POINT, RoutingError
 from divert.services.traffic import TrafficModel
 from divert.store.events import OUTBOX_TOPIC_COMMANDS
 
@@ -105,6 +105,8 @@ class EngineView(Protocol):
     def wants(self, dispatch_id: str, seq: int) -> bool: ...
 
     def plan_failed(self, dispatch_id: str, seq: int, error: str) -> bool: ...
+
+    def leg_not_needed(self, dispatch_id: str, seq: int) -> bool: ...
 
     def reroute_answered(self, dispatch_id: str, seq: int, reroute_no: int) -> None: ...
 
@@ -323,6 +325,8 @@ class LegPlanner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if self._already_home(req, exc):
+                    return
                 attempt += 1
                 reason = "routing" if isinstance(exc, RoutingError) else type(exc).__name__
                 LEG_PLAN_FAILURES.labels(city=req.city_id, kind=req.kind.value, reason=reason).inc()
@@ -346,6 +350,20 @@ class LegPlanner:
                 continue
             LEG_PLAN_DURATION.labels(kind=req.kind.value).observe(time.perf_counter() - started)
             return
+
+    def _already_home(self, req: PlanRequest, exc: Exception) -> bool:
+        """A RETURN whose origin and station snap to the same road point has no route, and
+        never will: the unit is home (B2), so tell the engine instead of retrying."""
+        if req.kind is not LegKind.RETURN:
+            return False
+        if not isinstance(exc, RoutingError) or exc.kind != SAME_POINT:
+            return False
+        done = self.view.leg_not_needed(req.dispatch_id, req.seq)
+        log.info(
+            "RETURN not needed: the unit is at its station's road point",
+            extra={"dispatch_id": req.dispatch_id, "seq": req.seq, "applied": done},
+        )
+        return True
 
     async def plan(self, req: PlanRequest) -> dict[str, Any]:
         """Plan (or re-send) one leg; returns the ``leg_planned`` command sent."""

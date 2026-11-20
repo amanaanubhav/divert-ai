@@ -7,7 +7,8 @@ the persister and the API.
 * a leg planned while Redis is unreachable is delivered by the outbox relay, applied once;
 * leader failover while a vehicle waits for its plan, and on the TRANSPORT leg;
 * OSRM failure during TRANSPORT planning: retries, the vehicle waits in place;
-* a patient taken to the unit's own hospital: no RETURN leg is needed.
+* a patient taken to the unit's own hospital: no RETURN leg is needed - also when the
+  hospital is mapped 40 m off the road, so every route to it ends at its road point.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from divert.store.redis_store import create_redis
 from divert.worker import EngineView, Worker
 from tests.integration.helpers import (
     Clock,
+    SnappingRouter,
     StubRouter,
     api,
     drain_persister,
@@ -656,3 +658,44 @@ async def test_patient_taken_to_the_units_own_hospital_needs_no_return_leg(
         summary = (await client.get("/api/v1/cities/delhi/analytics/summary")).json()
     assert summary["handover_to_back_in_service_s"]["count"] == 1
     assert summary["legs"]["RETURN"]["count"] == 0
+
+
+async def test_own_hospital_mapped_off_the_road_needs_no_return_leg(
+    test_settings: Settings, redis: Redis, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Stage 5 fix F1: the hospital's OSM point is 40 m from the road point OSRM snaps it
+    to (real case: Vimhans, 35.8 m). The TRANSPORT ends at that road point - where the
+    unit's RESPONSE started - so the unit is home: no RETURN, no endless planning."""
+    cfg = _settings(test_settings)
+    clock = Clock()
+    router = SnappingRouter("delhi", off_road_m=40.0)
+    worker = new_worker(cfg, redis, sessionmaker, clock, "w-offroad", router=router)
+    persister = Persister(cfg, redis, sessionmaker, instance_id="p-offroad")
+    await persister.setup()
+    async with api(cfg, redis, router=router) as (_, client):
+        created = await _dispatch(client, "delhi", "MEDICAL")
+        iid, did = created["incident"]["id"], created["vehicle"]["dispatch_id"]
+        clock.now = datetime.now(UTC)
+        assert await worker.try_lead()
+        await drive(worker, persister, clock, until=completed(sessionmaker, did), max_ticks=6000)
+    station = created["vehicle"]["station"]["id"]
+    off = await rows(
+        sessionmaker,
+        "SELECT l.seq, l.destination_station_id, "
+        "ST_Distance(ST_StartPoint(l.route::geometry)::geography, s.geom) AS start_off_m, "
+        "ST_Distance(ST_EndPoint(l.route::geometry)::geography, s.geom) AS end_off_m "
+        "FROM dispatch_legs l JOIN stations s ON s.id = :s "
+        "WHERE l.dispatch_id = :d ORDER BY l.seq",
+        s=station,
+        d=did,
+    )
+    assert [r.seq for r in off] == [0, 1], "RESPONSE and TRANSPORT only: no RETURN leg"
+    assert off[1].destination_station_id == station, "precondition: its own hospital"
+    assert off[0].start_off_m == pytest.approx(40.0, abs=0.5)  # RESPONSE from the road point
+    assert off[1].end_off_m == pytest.approx(40.0, abs=0.5)  # TRANSPORT to the road point
+    types = [e.type for e in await timeline(sessionmaker, iid)]
+    assert "leg_plan_failed" not in types
+    order = ["handover_complete", "returning", "back_in_service"]
+    assert [types.index(t) for t in order] == sorted(types.index(t) for t in order)
+    assert await _status(sessionmaker, "units", created["vehicle"]["id"]) == "AVAILABLE"
+    assert router.same_point == 0  # never even asked: the road point is known

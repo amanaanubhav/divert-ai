@@ -328,6 +328,8 @@ class Vehicle:
     next_seq: int = 1  # seq of the next leg to request
     incident_pos: LatLng | None = None  # the scene (the RESPONSE destination)
     home: LatLng | None = None  # the unit's station (the RETURN destination)
+    # the station's road point: where OSRM snaps it (the RESPONSE route's first point)
+    home_road: LatLng | None = None
     dest_kind: DestinationKind = DestinationKind.SCENE
     dest_station_id: str | None = None
     dest_name: str | None = None
@@ -362,6 +364,10 @@ class Vehicle:
     @property
     def rank(self) -> int:
         return priority_rank(self.service, self.leg_kind)
+
+    def at_home(self, pos: LatLng) -> bool:
+        """``pos`` is at the unit's own station (its OSM point or its road point)."""
+        return is_home(pos, self.home or self.route.origin, self.home_road)
 
     @property
     def moving(self) -> bool:
@@ -470,6 +476,7 @@ class Vehicle:
         """Field of the ``vehicles(city)`` hash: enough to resume after a failover."""
         inc = self.incident_pos or self.destination
         home = self.home or self.route.origin
+        road = self.home_road
         return {
             **self._public(),
             "city": self.city_id,
@@ -500,6 +507,7 @@ class Vehicle:
             ),
             "incident_location": [inc.lat, inc.lng],
             "home": [home.lat, home.lng],
+            "home_road": None if road is None else [_r(road.lat, 7), _r(road.lng, 7)],
             "dwell_s": _r(self.dwell_s, 2),
             "dwell_target_s": _r(self.dwell_target_s, 2),
             "next_seq": self.next_seq,
@@ -551,6 +559,7 @@ class Vehicle:
             route = Route.from_json(cmd["route"])
             dest = _point(cmd["destination"])
             station = cmd.get("station_pos")
+            leg_kind = LegKind(cmd.get("leg_kind", LegKind.RESPONSE.value))
             v = cls(
                 vehicle_id=str(cmd["vehicle_id"]),
                 dispatch_id=str(cmd["dispatch_id"]),
@@ -571,8 +580,9 @@ class Vehicle:
                 started_at=started_at,
                 eta_s=float(cmd["predicted_eta_s"]),
                 emergency=bool(cmd.get("emergency", True)),
-                leg_kind=LegKind(cmd.get("leg_kind", LegKind.RESPONSE.value)),
+                leg_kind=leg_kind,
                 home=None if station is None else _point(station),
+                home_road=_road_point(cmd.get("home_road"), route, leg_kind),
             )
         except (KeyError, TypeError, ValueError, IndexError) as exc:
             raise CommandError(f"invalid start_dispatch command: {exc!r}") from exc
@@ -650,6 +660,14 @@ def _legacy_phase(status: VehicleStatus) -> UnitStatus:
 
 def _point(raw: Any) -> LatLng:
     return LatLng(float(raw[0]), float(raw[1]))
+
+
+def _road_point(raw: Any, route: Route, leg_kind: LegKind) -> LatLng | None:
+    """The station's road point: as stored, else the start of a RESPONSE route (OSRM's
+    snap of the station); unknown for a later leg restored from an older live document."""
+    if raw:
+        return _point(raw)
+    return route.origin if leg_kind is LegKind.RESPONSE else None
 
 
 @dataclass(slots=True)
@@ -1087,7 +1105,7 @@ class SimulationEngine:
     ) -> None:
         """Ask the LegPlanner for the next leg (its seq is fixed here, deterministically).
         A RETURN from the unit's own station is not planned: it is home already."""
-        if kind is LegKind.RETURN and is_home(origin, v.home or v.route.origin):
+        if kind is LegKind.RETURN and v.at_home(origin):
             return
         p = PendingLeg(
             seq=v.next_seq,
@@ -1162,6 +1180,25 @@ class SimulationEngine:
             attempt=p.attempts,
             error=p.error,
         )
+        self.batch(v.city_id).vehicle_sets[v.vehicle_id] = v.live_json()
+        return True
+
+    def leg_not_needed(self, dispatch_id: str, seq: int) -> bool:
+        """The planner found that the requested RETURN has no length: its origin and the
+        station snap to the same road point (a station mapped off the road, reached
+        without the unit's road point being known). The unit is home: that point becomes
+        its road point, the request is dropped, and the unit is back in service once it
+        has stopped and its dwell is over (:meth:`_dwell`). Returns False when the request
+        no longer applies."""
+        v = self.find_dispatch(dispatch_id)
+        p = None if v is None else v.pending
+        if v is None or p is None or p.seq != seq or p.kind is not LegKind.RETURN:
+            return False
+        if v.ready is not None:
+            return False
+        # where the unit stands - or, still braking after a cancel, where it will stop
+        v.home_road = p.origin if v.moving else v.pos
+        v.pending = None
         self.batch(v.city_id).vehicle_sets[v.vehicle_id] = v.live_json()
         return True
 
@@ -1602,7 +1639,7 @@ class SimulationEngine:
             and v.pending is None
             and v.ready is None
             and v.dwell_s >= v.dwell_target_s
-            and is_home(v.pos, v.home or v.route.origin)
+            and v.at_home(v.pos)
         )
 
     def _dwell_done(self, v: Vehicle, wall: datetime) -> None:
