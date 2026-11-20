@@ -7,7 +7,9 @@ cannot be reached on any endpoint after retries the fetch raises and writes noth
 Per city:
   * ``node[highway=traffic_signals]`` -> clustered (single linkage, 40 m) into
     junction-level signals that keep their member OSM node ids;
-  * ``amenity=hospital`` -> AMBULANCE bases (named ones only);
+  * ``amenity=hospital`` -> AMBULANCE bases (named ones only), with their ``emergency``
+    (yes / no / null = untagged) and ``healthcare`` tags for hospital selection (design
+    §1.1);
   * ``amenity=fire_station`` -> FIRE_ENGINE bases; ``amenity=police`` -> POLICE bases.
 
 The ``traffic`` block (hourly congestion factors, average junction delay) is NOT OSM
@@ -99,10 +101,16 @@ STATION_KINDS: Final = {
     "police": ("POLICE", "P"),
 }
 _DUPLICATE_STATION_M: Final = 150.0
+EMERGENCY_VALUES: Final = frozenset({"yes", "no"})  # anything else is stored as null
+HEALTHCARE_MAX_LEN: Final = 32  # stations.healthcare column width
 
 
 class OverpassError(RuntimeError):
     """Overpass could not deliver a valid answer on any endpoint."""
+
+
+class NotCached(OverpassError):
+    """Offline regeneration: a query has no cached Overpass response."""
 
 
 def _bbox_str(b: dict[str, float]) -> str:
@@ -300,28 +308,42 @@ def extract_stations(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ):
             continue
         seen.append((service, key, pos))
-        stations.append(
-            {
-                "id": f"{prefix}{str(el['type'])[0]}{el['id']}",
-                "service": service,
-                "name": name,
-                "pos": [round(pos.lat, 6), round(pos.lng, 6)],
-                "osm": f"{el['type']}/{el['id']}",
-            }
-        )
+        station: dict[str, Any] = {
+            "id": f"{prefix}{str(el['type'])[0]}{el['id']}",
+            "service": service,
+            "name": name,
+            "pos": [round(pos.lat, 6), round(pos.lng, 6)],
+            "osm": f"{el['type']}/{el['id']}",
+        }
+        if service == "AMBULANCE":
+            station.update(hospital_tags(tags))
+        stations.append(station)
     return stations
 
 
+def hospital_tags(tags: dict[str, str]) -> dict[str, str | None]:
+    """``emergency`` (yes / no; other values and untagged -> None) and ``healthcare``."""
+    emergency = tags.get("emergency", "").strip().lower()
+    healthcare = tags.get("healthcare", "").strip().lower()
+    return {
+        "emergency": emergency if emergency in EMERGENCY_VALUES else None,
+        "healthcare": healthcare[:HEALTHCARE_MAX_LEN] or None,
+    }
+
+
 def _cached_overpass(
-    query: str, client: httpx.Client | None, cache_dir: Path | None
+    query: str, client: httpx.Client | None, cache_dir: Path | None, *, offline: bool = False
 ) -> tuple[dict[str, Any], str]:
-    """run_overpass with an optional raw-response cache (makes long fetches resumable)."""
+    """run_overpass with an optional raw-response cache (makes long fetches resumable).
+    ``offline``: only the cache - a query without a cached response raises NotCached."""
     path = None
     if cache_dir is not None:
         path = cache_dir / f"{hashlib.sha256(query.encode()).hexdigest()[:20]}.json"
         if path.is_file():
             cached: dict[str, Any] = json.loads(path.read_text("utf-8"))
             return cached["payload"], str(cached["endpoint"])
+    if offline:
+        raise NotCached(f"no cached Overpass response for a query ({path})")
     payload, endpoint = run_overpass(query, client=client)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,7 +352,11 @@ def _cached_overpass(
 
 
 def build_city(
-    city_id: str, *, client: httpx.Client | None = None, cache_dir: Path | None = None
+    city_id: str,
+    *,
+    client: httpx.Client | None = None,
+    cache_dir: Path | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
     profile = CITY_PROFILES[city_id]
     queries = build_queries(profile["bbox"])
@@ -339,7 +365,7 @@ def build_city(
     endpoints_used: list[str] = []
     osm_bases: list[str] = []
     for query in queries:
-        payload, endpoint = _cached_overpass(query, client, cache_dir)
+        payload, endpoint = _cached_overpass(query, client, cache_dir, offline=offline)
         endpoints_used.append(endpoint)
         base = payload.get("osm3s", {}).get("timestamp_osm_base")
         if base:
@@ -401,18 +427,35 @@ def build_city(
 
 
 def fetch_cities(
-    city_ids: list[str], out_dir: Path = DATA_DIR, cache_dir: Path | None = None
+    city_ids: list[str],
+    out_dir: Path = DATA_DIR,
+    cache_dir: Path | None = None,
+    *,
+    offline: bool = False,
 ) -> dict[str, Path]:
-    """Fetch every city first, then write all files (all-or-nothing per run)."""
+    """Fetch every city first, then write all files (all-or-nothing per run).
+
+    ``offline`` regenerates the snapshots from the raw Overpass responses in
+    ``cache_dir`` only (no network; a missing response fails the run) and keeps the
+    snapshot's ``meta.fetched_at`` - the data is still that fetch's."""
     unknown = sorted(set(city_ids) - set(CITY_PROFILES))
     if unknown:
         raise ValueError(f"unknown cities {unknown}; choose from {sorted(CITY_PROFILES)}")
+    if offline and cache_dir is None:
+        raise ValueError("--offline needs --cache-dir")
     built: dict[str, dict[str, Any]] = {}
     with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
         for i, city_id in enumerate(city_ids):
-            if i:
+            if i and not offline:
                 time.sleep(5)  # be polite to the public Overpass instances
-            built[city_id] = build_city(city_id, client=client, cache_dir=cache_dir)
+            built[city_id] = build_city(
+                city_id, client=None if offline else client, cache_dir=cache_dir, offline=offline
+            )
+            previous = out_dir / f"{city_id}.json"
+            if offline and previous.is_file():
+                old_meta = json.loads(previous.read_text("utf-8")).get("meta", {})
+                if old_meta.get("fetched_at"):
+                    built[city_id]["meta"]["fetched_at"] = old_meta["fetched_at"]
     out_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
     for city_id, data in built.items():
@@ -429,10 +472,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cache-dir", type=Path, default=None, help="keep raw Overpass responses (resumable)"
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="regenerate from the --cache-dir responses only (no network)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        written = fetch_cities(list(args.cities), args.out, args.cache_dir)
+        written = fetch_cities(list(args.cities), args.out, args.cache_dir, offline=args.offline)
     except (OverpassError, ValueError) as exc:
         log.error("fetch failed, nothing written: %s", exc)
         return 1

@@ -57,6 +57,8 @@ def parse_snapshot(data: dict[str, Any]) -> CitySnapshot:
             name=s.get("name"),
             pos=_latlng(s["pos"], f"station {s['id']}"),
             osm_ref=str(s["osm"]),
+            emergency=s.get("emergency"),
+            healthcare=s.get("healthcare"),
         )
         for s in data["stations"]
     )

@@ -3,7 +3,7 @@
 divert migrate            # alembic upgrade head + idempotent seed (the 'migrate' job)
 divert migrate --no-seed
 divert seed [--city delhi]
-divert fetch-data [delhi kolkata ...] [--cache-dir DIR]   # refresh OSM snapshots
+divert fetch-data [delhi kolkata ...] [--cache-dir DIR] [--offline]   # refresh OSM snapshots
 divert dlq [--replay] [--id ID ...]   # inspect / re-queue dead-lettered history events
 """
 
@@ -108,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_fetch = sub.add_parser("fetch-data", help="re-fetch OSM snapshots from Overpass")
     p_fetch.add_argument("cities", nargs="*")
     p_fetch.add_argument("--cache-dir", default=None)
+    p_fetch.add_argument("--offline", action="store_true", help="from --cache-dir only")
     p_dlq = sub.add_parser("dlq", help="list (default) or --replay the history DLQ")
     p_dlq.add_argument("--replay", action="store_true")
     p_dlq.add_argument("--id", action="append", dest="ids", default=[])
@@ -120,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from divert.cities import osm  # noqa: PLC0415 - optional, network-only path
 
         extra = ["--cache-dir", args.cache_dir] if args.cache_dir else []
+        extra += ["--offline"] if args.offline else []
         return osm.main([*args.cities, *extra])
     if args.cmd == "dlq":
         asyncio.run(dead_letters(settings, replay=args.replay, ids=args.ids))

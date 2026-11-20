@@ -28,6 +28,7 @@ from divert.db.models import Station as StationRow
 from divert.db.models import Unit as UnitRow
 from divert.domain.enums import ServiceType, UnitStatus
 from divert.domain.geo import BBox, LatLng
+from divert.domain.hospitals import NON_ACUTE_HEALTHCARE
 from divert.domain.models import (
     City,
     CorridorCandidate,
@@ -59,6 +60,8 @@ def _station_cols() -> tuple[Any, ...]:
         lng_of(StationRow.geom).label("lng"),
         StationRow.osm_type,
         StationRow.osm_id,
+        StationRow.emergency,
+        StationRow.healthcare,
     )
 
 
@@ -70,6 +73,8 @@ def _station(row: Any) -> Station:
         name=row.name,
         pos=LatLng(row.lat, row.lng),
         osm_ref=f"{row.osm_type}/{row.osm_id}",
+        emergency=row.emergency,
+        healthcare=row.healthcare,
     )
 
 
@@ -211,6 +216,43 @@ class ReferenceRepository:
             .limit(limit)
         )
         return [StationCandidate(_station(r), int(r.free), float(r.distance_m)) for r in rows]
+
+    async def get_station(self, station_id: str) -> Station | None:
+        row = (
+            await self.session.execute(
+                sa.select(*_station_cols()).where(StationRow.id == station_id)
+            )
+        ).first()
+        return None if row is None else _station(row)
+
+    async def nearest_hospitals(
+        self, city_id: str, point: LatLng, limit: int = 6
+    ) -> list[StationCandidate]:
+        """The ``limit`` nearest hospitals that can take an emergency patient (design §1.1):
+        active, named AMBULANCE stations (OSM amenity=hospital), excluding emergency=no and
+        the non-acute healthcare kinds. Index-assisted KNN like the dispatch query."""
+        pt = geog_point(point)
+        rows = await self.session.execute(
+            sa.select(
+                *_station_cols(),
+                sa.literal(0).label("free"),
+                sa.func.ST_Distance(StationRow.geom, pt).label("distance_m"),
+            )
+            .where(
+                StationRow.city_id == city_id,
+                StationRow.service == ServiceType.AMBULANCE,
+                StationRow.active,
+                StationRow.name.is_not(None),
+                sa.or_(StationRow.emergency.is_(None), StationRow.emergency != "no"),
+                sa.or_(
+                    StationRow.healthcare.is_(None),
+                    StationRow.healthcare.not_in(sorted(NON_ACUTE_HEALTHCARE)),
+                ),
+            )
+            .order_by(StationRow.geom.op("<->")(pt))
+            .limit(limit)
+        )
+        return [StationCandidate(_station(r), 0, float(r.distance_m)) for r in rows]
 
     # ----------------------------------------------------------------- signals
     async def list_signals(self, city_id: str) -> list[Signal]:

@@ -94,6 +94,8 @@ async def seed_city(
                 "osm_id": int(osm_id),
                 "geom": point_wkt(s.pos),
                 "active": True,
+                "emergency": s.emergency,
+                "healthcare": s.healthcare,
             }
         )
     for st_chunk in _chunks(station_rows):
@@ -107,6 +109,8 @@ async def seed_city(
                     "name": ins.excluded.name,
                     "geom": ins.excluded.geom,
                     "active": sa.true(),
+                    "emergency": ins.excluded.emergency,
+                    "healthcare": ins.excluded.healthcare,
                     "updated_at": sa.func.now(),
                 },
             )
