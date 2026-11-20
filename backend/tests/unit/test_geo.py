@@ -20,6 +20,8 @@ from divert.domain.geo import (
     interpolate_by_distance,
     polyline_length_m,
     project_onto_polyline,
+    simplify_capped,
+    simplify_polyline,
 )
 
 ONE_DEG_M = EARTH_RADIUS_M * math.pi / 180.0  # 111 195.08 m on this sphere
@@ -162,3 +164,58 @@ def test_bbox_contains() -> None:
     assert box.contains(LatLng(22.5726, 88.3639))
     assert not box.contains(LatLng(22.70, 88.36))
     assert box.contains(LatLng(22.45, 88.25))  # inclusive edges
+
+
+# ------------------------------------------------- polyline simplification (fix-2 B7)
+
+
+def _zigzag(n: int, offset_m: float, step_m: float = 20.0) -> list[LatLng]:
+    """East-going line whose every other point is ``offset_m`` north of it."""
+    base = LatLng(28.6, 77.2)
+    pts = []
+    for i in range(n):
+        p = destination_point(base, 90.0, i * step_m)
+        pts.append(destination_point(p, 0.0, offset_m) if i % 2 else p)
+    return pts
+
+
+def _max_deviation_m(original: list[LatLng], simplified: list[LatLng]) -> float:
+    return max(project_onto_polyline(p, simplified).offset_m for p in original)
+
+
+def test_simplify_drops_collinear_points_and_keeps_the_ends() -> None:
+    line = [destination_point(LatLng(28.6, 77.2), 45.0, 25.0 * i) for i in range(60)]
+    assert simplify_polyline(line, 10.0) == [line[0], line[-1]]
+    assert simplify_polyline(line[:2], 10.0) == line[:2]
+    assert simplify_polyline([], 10.0) == []
+
+
+def test_simplify_keeps_every_point_farther_than_the_tolerance() -> None:
+    zig = _zigzag(41, 30.0)
+    assert simplify_polyline(zig, 10.0) == zig  # every corner is 30 m off
+    assert simplify_polyline(zig, 50.0) == [zig[0], zig[-1]]
+
+
+def test_simplified_line_stays_within_the_tolerance() -> None:
+    rng = random.Random(7)
+    p = LatLng(28.6, 77.2)
+    pts = [p]
+    heading = 80.0
+    for _ in range(800):  # a wandering 8 km road
+        heading += rng.uniform(-25.0, 25.0)
+        pts.append(destination_point(pts[-1], heading, 10.0))
+    out = simplify_polyline(pts, 10.0)
+    assert (out[0], out[-1]) == (pts[0], pts[-1])
+    assert len(out) < len(pts) / 3
+    assert _max_deviation_m(pts, out) <= 10.0 * 1.001  # (planar vs haversine)
+    assert [pts.index(q) for q in out] == sorted(pts.index(q) for q in out)  # order kept
+
+
+def test_simplify_capped_bounds_the_point_count() -> None:
+    zig = _zigzag(1001, 30.0)
+    out = simplify_capped(zig, 10.0, 150)
+    assert 2 <= len(out) <= 150
+    assert (out[0], out[-1]) == (zig[0], zig[-1])
+    assert simplify_capped(zig[:50], 10.0, 150) == zig[:50]  # under the cap: untouched
+    with pytest.raises(ValueError, match="at least 2"):
+        simplify_capped(zig, 10.0, 1)

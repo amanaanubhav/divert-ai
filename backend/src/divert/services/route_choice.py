@@ -13,7 +13,9 @@
 Candidates longer than 1.6 x the shortest are dropped. The cheapest wins; candidates
 within 5 % of it prefer fewer signalised right / U turns, then fewer contested
 junctions, then the shorter distance. Every candidate is recorded in ``route_choice``
-JSON with the reason shown in the UI.
+JSON with the reason shown in the UI, and with a simplified polyline (``route``:
+Douglas-Peucker at 10 m, at most 150 points, 5 decimals) so the UI can draw the
+alternatives that were not taken.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from divert.domain.enums import Movement, ServiceType
+from divert.domain.geo import simplify_capped
 from divert.domain.models import City, IncidentZone
 from divert.domain.route import CorridorSignal, Route
 from divert.services.eta import DEFAULT_STEP_S, EtaModel, EtaQuery
@@ -59,6 +62,13 @@ LONGER_NOTE_SHARE: Final = 0.10
 # turns across the oncoming traffic (India drives on the left)
 RIGHT_TURNS: Final = frozenset({Movement.RIGHT, Movement.SHARP_RIGHT, Movement.U_TURN})
 _LABELS: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# Candidate geometry in route_choice JSON (drawn by the UI, never used for motion).
+# Assumption: 10 m is below what a city map shows at street zoom, so the drawn line stays
+# on its road; 150 points (~3.5 KB of JSON per candidate) bound the payload of a long
+# route (the tolerance doubles until it fits); 5 decimals = 1.1 m.
+CANDIDATE_SIMPLIFY_M: Final = 10.0
+CANDIDATE_MAX_POINTS: Final = 150
+CANDIDATE_DECIMALS: Final = 5
 
 
 def turn_delay_s(c: CorridorSignal) -> float:
@@ -83,6 +93,12 @@ def signalised_right_turns(corridor: Sequence[CorridorSignal]) -> int:
 
 def label(i: int) -> str:
     return _LABELS[i] if i < len(_LABELS) else f"R{i + 1}"
+
+
+def candidate_polyline(route: Route) -> list[list[float]]:
+    """The candidate's route for drawing: simplified, capped, rounded [lat, lng] pairs."""
+    pts = simplify_capped(route.points, CANDIDATE_SIMPLIFY_M, CANDIDATE_MAX_POINTS)
+    return [[round(p.lat, CANDIDATE_DECIMALS), round(p.lng, CANDIDATE_DECIMALS)] for p in pts]
 
 
 def congested_road(route: Route, factors: Sequence[float]) -> tuple[str | None, float]:
@@ -149,6 +165,7 @@ class Candidate:
                 {"incident_id": z.incident_id, "type": z.type.value} for z in self.zones
             ],
             "congested_road": self.congested_road,
+            "route": candidate_polyline(self.route),
         }
 
 

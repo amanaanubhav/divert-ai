@@ -59,6 +59,12 @@ async def test_dispatch_scores_alternatives_and_records_the_route_choice(
     for cand in choice["candidates"]:
         assert cand["congested_time_s"] >= cand["base_time_s"] > 0
         assert 0.0 <= cand["crowd_index"] <= 1.0
+        # stage 5 fix-2 B7: every candidate can be drawn (simplified, bounded polyline)
+        assert 2 <= len(cand["route"]) <= 150
+        assert all(len(p) == 2 for p in cand["route"])
+    a, b = (c["route"] for c in choice["candidates"])
+    assert a != b  # the detour is drawn where it goes
+    assert len(a) == 2  # the straight route needs only its ends
     # the chosen route's ETA is the dispatch ETA
     chosen = next(c for c in choice["candidates"] if c["label"] == choice["chosen"])
     assert body["vehicle"]["eta_s"] == pytest.approx(chosen["congested_time_s"], abs=0.1)

@@ -14,6 +14,8 @@ from divert.domain.route import CorridorSignal, Route
 from divert.domain.signal_plan import PhasePlan
 from divert.services.eta import KinematicEtaModel, expected_signal_wait_s
 from divert.services.route_choice import (
+    CANDIDATE_MAX_POINTS,
+    candidate_polyline,
     choose,
     junction_delay_s,
     make_candidate,
@@ -186,3 +188,35 @@ def test_route_choice_json_records_every_candidate() -> None:
     assert first["congested_time_s"] > first["base_time_s"]
     only = choose([choice.candidates[0]])
     assert only.reason == "Route A: the only route"
+
+
+# ------------------------------------------------ candidate geometry (fix-2 B7)
+
+
+def test_every_candidate_carries_a_simplified_bounded_polyline() -> None:
+    a, b = two_routes()
+    cands = [
+        make_candidate(i, r, [], eta_s=100.0, base_s=90.0, factors=[1.0] * (len(r.points) - 1),
+                       emergency=True)
+        for i, r in enumerate((a, b))
+    ]  # fmt: skip
+    doc = choose(cands).to_json()
+    lines = {c["label"]: c["route"] for c in doc["candidates"]}
+    assert lines["A"] == [
+        [round(ORIGIN.lat, 5), round(ORIGIN.lng, 5)],
+        [round(D.lat, 5), round(D.lng, 5)],
+    ]
+    assert len(lines["B"]) == 3  # straight legs: only the ends and the corner remain
+    via = b.points[len(b.points) // 2]
+    assert min(abs(p[0] - via.lat) + abs(p[1] - via.lng) for p in lines["B"]) < 2e-4
+
+
+def test_a_long_winding_candidate_is_capped() -> None:
+    pts = [ORIGIN]
+    for i in range(1000):  # 10 km of 10 m zig-zags 30 m wide: nothing within 10 m
+        p = destination_point(pts[0], 90.0, 10.0 * (i + 1))
+        pts.append(destination_point(p, 0.0, 30.0) if i % 2 else p)
+    route = Route.build(pts, [12.0] * (len(pts) - 1))
+    line = candidate_polyline(route)
+    assert 2 <= len(line) <= CANDIDATE_MAX_POINTS
+    assert line[0] == [round(ORIGIN.lat, 5), round(ORIGIN.lng, 5)]

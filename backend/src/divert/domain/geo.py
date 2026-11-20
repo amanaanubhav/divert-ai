@@ -166,3 +166,60 @@ def project_onto_polyline(
             best = Projection(q, along, off, i, t)
     assert best is not None
     return best
+
+
+def _planar_m(points: Sequence[LatLng]) -> list[tuple[float, float]]:
+    """Equirectangular metres about the polyline's mean latitude (city scale: the error
+    against haversine is far below a metre per kilometre)."""
+    k = math.cos(math.radians(sum(p.lat for p in points) / len(points)))
+    m_per_deg = EARTH_RADIUS_M * math.pi / 180.0
+    return [(p.lng * k * m_per_deg, p.lat * m_per_deg) for p in points]
+
+
+def _segment_distance(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    bx, by = b[0] - a[0], b[1] - a[1]
+    px, py = p[0] - a[0], p[1] - a[1]
+    seg2 = bx * bx + by * by
+    t = 0.0 if seg2 == 0.0 else max(0.0, min(1.0, (px * bx + py * by) / seg2))
+    return math.hypot(px - t * bx, py - t * by)
+
+
+def simplify_polyline(points: Sequence[LatLng], tolerance_m: float) -> list[LatLng]:
+    """Douglas-Peucker: the subset of ``points`` (both ends kept, order kept) such that
+    every dropped point lies within ``tolerance_m`` of the simplified line. Iterative
+    (no recursion limit on long routes); deterministic."""
+    n = len(points)
+    if n <= 2:
+        return list(points)
+    xy = _planar_m(points)
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    spans = [(0, n - 1)]
+    while spans:
+        i, j = spans.pop()
+        if j - i < 2:
+            continue
+        a, b = xy[i], xy[j]
+        # ties go to the most central point (balanced splits; deterministic)
+        far, _, k = max(
+            (_segment_distance(xy[m], a, b), -abs(2 * m - i - j), m) for m in range(i + 1, j)
+        )
+        if far > tolerance_m:
+            keep[k] = True
+            spans += [(i, k), (k, j)]
+    return [p for p, kept in zip(points, keep, strict=True) if kept]
+
+
+def simplify_capped(points: Sequence[LatLng], tolerance_m: float, max_points: int) -> list[LatLng]:
+    """:func:`simplify_polyline` at ``tolerance_m``, with the tolerance doubled until at
+    most ``max_points`` remain (``max_points`` >= 2): a bounded payload for any route."""
+    if max_points < 2:
+        raise ValueError("max_points must be at least 2")
+    tol = tolerance_m
+    out = simplify_polyline(points, tol)
+    while len(out) > max_points:
+        tol *= 2.0
+        out = simplify_polyline(points, tol)
+    return out
