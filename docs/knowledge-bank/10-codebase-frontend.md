@@ -32,8 +32,8 @@ frontend/
 ├── nginx/default.conf.template   nginx config rendered at start (envsubst): SPA, /api proxy, CSP
 ├── public/favicon.svg       plain primary-blue square with a white "D" (system font)
 ├── scripts/                 dev tooling, not shipped
-│   ├── clickability.mjs     `npm run check:ui`: real-browser check that nothing covers a control (section 4.1)
-│   └── ui-check-mocks.mjs   deterministic API + WebSocket mocks for it
+│   ├── clickability.mjs     `npm run check:ui`: real-browser check that nothing covers or cuts off a control and nothing overflows its panel (section 4.1)
+│   └── ui-check-mocks.mjs   deterministic API + WebSocket mocks for it (with very long real-style names)
 ├── .ui-check/               check:ui screenshots + results.json (gitignored)
 └── src/
     ├── main.tsx             entry: Leaflet CSS, Noto Sans 400/500/600 (@fontsource), index.css, <StrictMode><Providers><App/></Providers></StrictMode>
@@ -67,7 +67,7 @@ frontend/
     │   │                    CHART_NEUTRAL, STATUS_TONE, PHASE_TONE, DISPATCH_STATUS_TONE
     │   └── useNow.ts        Date.now() refreshed on an interval
     ├── components/ui/       shared presentational components
-    │   ├── Panel.tsx        Panel (titled section), EmptyState, Spinner, Stat
+    │   ├── Panel.tsx        Panel (titled section, `min-w-0`, `scrollX` = `data-scroll-x` body), EmptyState, Spinner, Stat
     │   ├── Button.tsx       Button variants
     │   ├── Badges.tsx       StatusBadge, TypeBadge, ServiceDot, PhaseChip, DispatchStatusBadge, LegTag (leg + line sample)
     │   ├── MovementIcon.tsx stroked arrow for a movement (decorative, always next to text)
@@ -293,6 +293,13 @@ The console is meant to look like a plain civic operations tool: light by defaul
 - Live: from `lg` the three columns fill the content area and the side columns scroll; below `lg` the panels stack at their natural height (map `55vh`, min 18 rem) and `<main>` scrolls. Never give the stacked layout a fixed height with `min-h-0` children: the grid rows then shrink to the viewport and later panels paint over earlier ones (the bug fixed in Stage 5-UI).
 - Toasts sit at the top centre of the content area (never over the header), let clicks through (`pointer-events: none`) except on their close button, are short-lived and are cleared on tab or city change.
 - History hides the coordinates column below `xl` so the Details buttons stay in view on tablets.
+- **Nothing is wider than its column** (stage 5 fix-2, U1). Real OSM station names run past 80 characters ("Sir Ganga Ram Hospital Multi Speciality Emergency and Trauma Centre Old Rajinder Nagar"). The Live right column becomes a grid at `lg`. Its implicit `auto` track grew to the longest unbroken name, so the panels went 399-409 px wide in a 304/336 px column, and the Cancel/Confirm buttons, phase chips and ETAs were pushed off-screen. The fix has four parts:
+  - every Live column, `Panel` (section, header, body) and list row is `min-w-0`;
+  - the right column's grid has an explicit `lg:grid-cols-[minmax(0,1fr)]` track;
+  - names `truncate` with an ellipsis and keep the full text in a `title` tooltip (incident hospital and description, unit id, fleet destination and home station, activity feed, nearest station, `Stat` labels, History notes, drawer id), or wrap where there is room (drawer, explainer, next-junction text);
+  - the fleet card's top row wraps, so the unit id (about 20 characters) stays whole and the phase chip and ETA move under it in a narrow column.
+- Every scroll box (`<main>`, `Panel` body, the left Live column, the activity feed, the drawer body and its tables) is `relative`. Otherwise absolutely positioned `sr-only` labels in rows below the fold escape the scroll box and make the document taller than the viewport: focus or the wheel then scrolls the header away (seen on real Delhi data: +19 to +189 px).
+- A box that may scroll sideways on purpose (a wide table on a phone) is marked `data-scroll-x` (`Panel scrollX`). `check:ui` fails every other sideways overflow (4.1).
 
 ### 2.7 Configuration (`config.ts`)
 
@@ -315,7 +322,7 @@ The backend contract is in [api.md](../api.md) ("Trip legs", the live vehicle fi
 |---|---|---|
 | Live map | The current leg of each vehicle: RESPONSE solid service colour, TRANSPORT solid violet with a patient badge, RETURN dashed grey. The destination hospital is highlighted. Free-left junctions are tagged. Junction states have their own shapes and a click popup (2.4). | `LiveVehiclesLayer`, `LegLayers`, `ActiveSignalsLayer` |
 | Fleet card | Each vehicle card shows:<ul><li>a phase chip (Responding, On scene, Transporting, At hospital, Returning)</li><li>the leg (with a sample of its line) and destination</li><li>the next movement as an arrow plus text ("Right in 75 m at ITO crossing")</li><li>how the junction treats it: changing to green, green held, queued (position n), not claimed yet, obeys the signal (RETURN), or slip road</li><li>the advice text</li><li>a lane diagram with "Be in lane n within x m" (or "Stay in lane n", or "Single lane: traffic pulls left")</li><li>the speed advisory ("Slow to 18 km/h: green expected on arrival", or stop at the stop line)</li><li>"Planning route…" with the planner's last error</li><li>the dwell time "of" the configured dwell on scene or at the hospital (simulated)</li></ul>The selected vehicle also shows "Why this route" for its current leg (incident detail `legs[].route_choice`). | `FleetPanel`, `fleetText.ts`, `LiveRouteWhy`, `MovementIcon`, `LaneDiagram` |
-| "Why this route" | The reason, then each candidate:<ul><li>distance, travel time and cost</li><li>crowd index and signals</li><li>right turns, contested junctions and incident zones</li><li>the busiest road</li></ul>Hovering or focusing it publishes the alternatives' geometries as a route preview, which the map draws faint and dashed. **The backend records candidate costs but not their geometry** (`route_choice.candidates[].route` is not sent today), so the explainer says the alternatives cannot be drawn. The frontend draws them as soon as the field is present. | `RouteChoiceExplainer`, `routeChoice.ts` |
+| "Why this route" | The reason, then each candidate:<ul><li>distance, travel time and cost</li><li>crowd index and signals</li><li>right turns, contested junctions and incident zones</li><li>the busiest road</li></ul>Hovering or focusing it publishes the alternatives' geometries as a route preview, which the map draws faint and dashed. The geometry is `route_choice.candidates[].route`: a simplified `[[lat, lng], ...]` polyline that the backend stores with every candidate (stage 5 fix-2; docs/api.md). Route choices recorded before then have none. `routeChoice.geometryNote` then says the alternatives cannot be drawn, and it names a single alternative without geometry when the others can be drawn. A candidate with fewer than two points counts as missing (`hasRoute`). | `RouteChoiceExplainer`, `routeChoice.ts` |
 | Incidents panel | TRANSPORTING and AT_HOSPITAL chips, with the destination hospital. While a patient is on board, Cancel is `aria-disabled` with a tooltip and an explanatory toast on click. A 409 `cannot_cancel_transport` (a race with the worker) gets a "Cannot cancel" toast. A live `incident_updated` with `reason` "cancel refused: ..." restores the real status even after a CANCELLED. | `IncidentsPanel`, `merge.ts` |
 | History drawer | <ul><li>Summary times including transport started and at hospital.</li><li>Response and call-to-hospital in simulated seconds, as the analytics compute them.</li><li>The trip status per dispatch.</li><li>One card per leg: destination, distance, emergency or "obeys signals", corridor junctions (free lefts), pre-emptions, re-routes, predicted vs actual bars, and the error (`eta_error_pct` = (actual − predicted) / actual) against ±10 %. Each card has "Why this route", previewed on the replay map.</li><li>The hospital: its emergency-department tag, why it was chosen, and the hospitals considered.</li><li>Pre-emptions with leg, movement, lane n of m, green extended / red truncated, outcome and waited time.</li><li>The timeline grouped by leg.</li><li>The replay across all legs, with a leg bar and jump buttons.</li></ul> | `IncidentDrawer`, `drawerText.ts`, `TrackReplay`, `replay.ts` |
 | Analytics | <ul><li>City cards add transports, call-to-hospital p50 and re-routes.</li><li>"Pre-emption outcomes": green extended, red truncated, free-left passes, re-routes, the extension vs truncation split, and the outcome bars.</li><li>"Patient transport": p50 / p90 of transport, call-to-hospital and handover-to-back-in-service, plus the hospital distribution.</li><li>"ETA accuracy by leg": MAPE and worst error per leg kind, scaled to 10 %.</li><li>"Dispatches by status (whole trip)".</li></ul>Each panel is left out when an older server does not send its fields. | `AnalyticsView` |
@@ -391,7 +398,7 @@ sequenceDiagram
 | `features/analytics/AnalyticsView.test.tsx` | (also) transport times, hospitals, ETA accuracy by leg, pre-emption outcomes, green vs red split, dispatches by status; panels left out for an older server |
 
 **Not tested:**
-- **No functional end-to-end tests in CI.** The real-browser `check:ui` (4.1) only checks that controls are reachable; it is run by hand, not in CI.
+- **No functional end-to-end tests in CI.** The real-browser `check:ui` (4.1) checks only that controls are reachable and whole, and that nothing overflows its panel. It is run by hand, not in CI.
 - Nothing that needs Leaflet's canvas: `LiveMap`, `LiveVehiclesLayer`, `ReferenceLayers`, `ActiveSignalsLayer`, `DispatchMapLayer`, `TrackReplay`. jsdom has no canvas. Their logic is covered through `store/live.ts`, `lib/geo.ts` and `replay.ts`.
 - The `App` shell, including the `useHashRoute` effect (`parseHash` / `formatHash` are tested), `useCityStream` as a whole (its parts are tested), `StatsPanel`, `ConnectionStatus`, `ApiKeyButton`.
 - The Leaflet parts of the trip-leg UI (leg lines, patient badge, hospital marker, free-left tags, junction shapes and popup, route preview, replay leg bar) need a canvas: their logic is unit-tested (`legData`, `signalText`, `replay`), their look and reachability only by `check:ui` screenshots.
@@ -403,7 +410,15 @@ CI (`.github/workflows/ci.yml`, job `frontend`, Node 22) runs `npm ci`, `format:
 
 A dev-only regression check for overlapping UI (`scripts/clickability.mjs`). jsdom has no layout engine, so it cannot see one panel painting over another; this drives a real browser instead. `playwright-core` is a devDependency used only here: it drives the locally installed Microsoft Edge (falls back to Chrome, then a Playwright Chromium if one was installed with `npx playwright-core install chromium`) and downloads no browser. Nothing of it is in the bundle or the nginx image.
 
-For every city (Delhi, Kolkata, Bengaluru) and viewport (360x740, 768x1024, 1024x768, 1280x800, 1440x900, 1920x1080) it opens Live, History and Analytics and, for every visible button, link, tab, radio, checkbox and input, asserts that `document.elementFromPoint(centre)` is the control or inside it. Controls already on screen are tested where they are; controls clipped by a scroll area are scrolled into view first, and one that cannot be is reported as unreachable. It repeats the check in these states:
+For every city (Delhi, Kolkata, Bengaluru) and viewport (360x740, 768x1024, 1024x768, 1280x800, 1440x900, 1920x1080) it opens Live, History and Analytics and, for every visible button, link, tab, radio, checkbox and input, asserts that `document.elementFromPoint(centre)` is the control or inside it. Controls already on screen are tested where they are. Controls clipped by a scroll area are scrolled into view first (`block: center`, `inline: nearest`). One that cannot be is reported as unreachable. One whose bounding box still is not fully inside the viewport and every clipping panel is reported as clipped.
+
+Before the controls, each state gets layout checks (`layoutFailures` inside `hitTest`):
+- The page never scrolls, sideways or down: the shell is one viewport tall and `<main>` scrolls.
+- No scroll box overflows sideways (`scrollWidth > clientWidth`), except boxes marked `data-scroll-x` and Leaflet popup content.
+- Every element inside a panel (`main`, `aside`, `section`, `article`, `header`, the dialog, a map popup) lies horizontally inside that panel. The top-level panels must lie inside the viewport, and a map popup inside its map.
+- Children of `overflow: hidden` boxes (ellipsis, progress bars, the map) are skipped: they clip on purpose. Each overflowing subtree is reported once.
+
+It repeats the check in these states:
 - with the transporting ambulance selected and its "Why this route" open (alternatives drawn on the map)
 - with a queued junction's popup open (closed again afterwards)
 - after a dispatch (map click + Dispatch, success toast visible), and after switching to History right after it
@@ -419,7 +434,10 @@ That makes 11 states per city and viewport, 198 in all. The mocks (`scripts/ui-c
 - a RETURN leg
 - one junction in each state
 - history details with three legs, a hospital choice and route choices with geometries
-- the trip-leg analytics It also records any Content-Security-Policy violation reported in the browser console (for example a font or script the CSP blocks). Screenshots and `results.json` go to `frontend/.ui-check/` (gitignored). It exits 1 on any covered or unreachable control or CSP violation.
+- the trip-leg analytics
+- very long real-style station, junction and incident texts per city (`LONG_NAMES`, `LONG_JUNCTION`; the Delhi transport hospital is "Sir Ganga Ram Hospital Multi Speciality Emergency and Trauma Centre Old Rajinder Nagar") and real-style station ids (`Hn10050577769`, so unit ids such as `AMB-Hn10050577769-1`)
+
+It also records any Content-Security-Policy violation reported in the browser console (for example a font or script the CSP blocks). Screenshots and `results.json` (with `layoutBoxesChecked`) go to `frontend/.ui-check/` (gitignored). It exits 1 on any covered, unreachable or clipped control, layout failure or CSP violation. The dispatch scenario clicks only open map: on a phone the city's markers cover much of it, and a click on a marker opens its popup instead. It skips offsets whose `elementFromPoint` is a marker, label, popup or map control, and it waits for the armed form (`isVisible()` does not wait). Before this, the 360 px Delhi dispatch flaked.
 
 ```bash
 npm run build && npm run check:ui                        # mock mode: vite preview of dist/, API + WebSocket mocked (scripts/ui-check-mocks.mjs), tiles stubbed
@@ -429,6 +447,12 @@ npm run check:ui -- --cities delhi --viewports 1440x900,360x740 --dark --real-ti
 ```
 
 Stage 5-UI result: before the fix the running stack failed 66 checks in 40 of 144 states (stacked Live panels painting over the Dispatch panel below `lg`; bottom-right toasts covering Zoom out and the History Details buttons). After the fix: 0 failures in all 144 states, in mock mode and against the rebuilt :8080 image (`--mock-api`), with no CSP violations.
+
+Stage 5 fix-2 result (U1, long real names):
+- Before the layout fix, the strengthened check with the long-name mocks failed every Live state at 1024 and 1440. The Incidents and Fleet sections stuck out of the right column by 377-409 px, and `<main>` scrolled sideways.
+- The new "page scrolls vertically" check then failed Live and Analytics: the document was 420-2424 px taller than the viewport.
+- After the fix: 0 failures in all 198 states.
+- A replay of the runtime verifier's recorded Delhi stream (real OSM names, 1024-1920 px) confirmed it. On the old image every Cancel button and phase chip was off-screen. On the new build all were on screen and clickable, and the page no longer scrolled.
 
 ---
 
@@ -491,7 +515,7 @@ In development, `npm run dev` (port 5173) proxies `/api` (WebSocket included), `
 
 ### 7.1 Add a panel
 
-1. Create `src/features/<name>/<Name>Panel.tsx`. Wrap it in `Panel` from `components/ui/Panel.tsx` (`title`, optional `actions`, and an `id` so the heading labels the section). Use `EmptyState`, `Spinner` and `Stat` for common states.
+1. Create `src/features/<name>/<Name>Panel.tsx`. Wrap it in `Panel` from `components/ui/Panel.tsx` (`title`, optional `actions`, and an `id` so the heading labels the section). Use `EmptyState`, `Spinner` and `Stat` for common states. Truncate names with `truncate` + `title` (full text) and give flex/grid children that hold text `min-w-0` (2.6).
 2. Read data:
    - live data with narrow selectors: `useLiveStore((s) => s.vehicles)`
    - REST data through a hook in `api/queries.ts`

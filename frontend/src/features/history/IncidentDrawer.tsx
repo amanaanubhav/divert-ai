@@ -145,13 +145,15 @@ export function IncidentDrawer({
               {d ? <TypeBadge type={d.type} /> : 'Incident'}
               {d ? <StatusBadge status={d.status} /> : null}
             </h2>
-            <p className="mt-0.5 truncate font-mono text-xs text-muted">{incidentId}</p>
+            <p className="mt-0.5 truncate font-mono text-xs text-muted" title={incidentId}>
+              {incidentId}
+            </p>
           </div>
           <Button ref={closeRef} size="sm" onClick={onClose} aria-label="Close">
             Close
           </Button>
         </header>
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+        <div className="relative min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
           {detail.isLoading ? <Spinner label="Loading incident" /> : null}
           {detail.isError ? (
             <p className="text-sm text-bad">Could not load this incident.</p>
@@ -447,7 +449,10 @@ function Hospital({ d, legs }: { d: IncidentDetail; legs: readonly LegRecord[] }
             <summary className="cursor-pointer select-none px-2 py-1 text-xs font-medium text-accent">
               Hospitals considered · {choice.candidates.length}
             </summary>
-            <div className="overflow-x-auto border-t border-line px-2 py-1">
+            <div
+              className="relative overflow-x-auto border-t border-line px-2 py-1"
+              data-scroll-x=""
+            >
               <table className="w-full text-left text-xs">
                 <thead className="text-muted">
                   <tr>
@@ -534,7 +539,7 @@ function Preemptions({
               {green} green extended · {red} red truncated
             </p>
           ) : null}
-          <div className="overflow-x-auto">
+          <div className="relative overflow-x-auto" data-scroll-x="">
             <table className="w-full text-left text-sm">
               <thead className="text-xs text-muted">
                 <tr>

@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 // UI clickability check (dev tool, not shipped): drives a real browser over every view, city and
 // viewport and asserts that nothing covers a visible control, i.e. that
-// document.elementFromPoint(centre of the control) is the control itself or inside it.
+// document.elementFromPoint(centre of the control) is the control itself or inside it, and that
+// the control's whole bounding box can be shown: inside the viewport and inside every scrolling
+// panel that holds it (scrolled into view if needed).
+//
+// Layout checks in every state: the page never scrolls sideways, no scrolling panel overflows
+// sideways (only boxes marked `data-scroll-x`, e.g. wide tables, may), every panel lies inside
+// the viewport and inside the column / panel that holds it, and nothing sticks out of a panel.
+// The mocks carry very long real-style station and junction names to stress this.
 //
 // It also checks the same after a dispatch toast, with the History drawer open and with the
 // API-key popover open. Screenshots and results.json go to .ui-check/ (gitignored).
@@ -149,13 +156,24 @@ async function startPreview() {
 
 // ---------------------------------------------------------------- in-page hit testing
 /**
- * Runs in the page. For every visible control (optionally limited to `scope` roots):
+ * Runs in the page. Layout first (see layoutFailures below), then for every visible control
+ * (optionally limited to `scope` roots):
  *  pass 1: controls fully inside their scroll containers and the viewport are hit-tested where
  *          they are (what the operator sees right now);
- *  pass 2: the rest are scrolled into view (block: centre) and hit-tested; a control that cannot
- *          be brought into view is reported as unreachable.
+ *  pass 2: the rest are scrolled into view (block: centre, inline: nearest) and must then be
+ *          fully visible (bounding box inside the viewport and every clipping panel) and
+ *          hit-tested; a control that cannot be brought into view is reported as unreachable,
+ *          one that stays partly cut off as clipped.
  */
 function hitTest(scopeSelectors) {
+  // Sub-pixel rounding allowance for box comparisons (px).
+  const TOL = 1
+  // Boxes that may scroll sideways on purpose (wide tables); Leaflet's popup content scrolls
+  // sideways on a small map rather than being clipped (see index.css).
+  const SCROLL_X_OK = '[data-scroll-x], .leaflet-popup-content'
+  // What counts as a panel: page columns, titled sections, cards, the drawer, map popups.
+  const PANEL =
+    'main, aside, section, article, header, [role="dialog"], .leaflet-popup-content-wrapper'
   const SEL = [
     'a[href]',
     'button',
@@ -251,8 +269,90 @@ function hitTest(scopeSelectors) {
     return { x: Math.round(x), y: Math.round(y), hit: describe(hit) }
   }
 
+  // ------------------------------------------------------------ layout (no clicking)
+  const clips = (el) => {
+    const cs = getComputedStyle(el)
+    return cs.overflowX !== 'visible' || cs.overflowY !== 'visible'
+  }
+  const scrolls = (el) => /^(auto|scroll)$/.test(getComputedStyle(el).overflowX)
+  /** Inside the map (tiles, markers, labels): Leaflet positions and clips those itself. */
+  const inMap = (el) => Boolean(el.closest('.leaflet-container')) && !el.closest('.leaflet-popup')
+  /** The panel or clipping box an element must stay inside; null = the viewport. */
+  const holderOf = (el) => {
+    if (getComputedStyle(el).position === 'fixed') return null
+    for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+      if (getComputedStyle(a).position === 'fixed') return null
+      if (a.matches(PANEL) || clips(a)) return a
+    }
+    return null
+  }
+  /** Horizontal extent available inside a holder (its padding box when it clips). */
+  const spanOf = (h) => {
+    if (!h) return { left: 0, right: document.documentElement.clientWidth }
+    const r = h.getBoundingClientRect()
+    if (!clips(h)) return { left: r.left, right: r.right }
+    const left = r.left + h.clientLeft
+    return { left, right: left + h.clientWidth }
+  }
+  const layoutFailures = () => {
+    const out = []
+    /** Boxes reported as sticking out: their subtrees are not reported again. */
+    const stuckOut = []
+    const fail = (el, reason, r) =>
+      out.push({ control: describe(el), reason, x: Math.round(r.right), y: Math.round(r.top) })
+    const doc = document.documentElement
+    if (doc.scrollWidth > doc.clientWidth + TOL)
+      fail(doc, `page scrolls sideways by ${doc.scrollWidth - doc.clientWidth} px`, {
+        right: doc.clientWidth,
+        top: 0,
+      })
+    // The app shell is exactly one viewport tall and #main scrolls inside it; a taller document
+    // (e.g. an absolutely positioned sr-only label escaping its scrolling panel) lets focus or
+    // the wheel scroll the header away.
+    if (doc.scrollHeight > doc.clientHeight + TOL)
+      fail(doc, `page scrolls vertically by ${doc.scrollHeight - doc.clientHeight} px`, {
+        right: doc.clientWidth,
+        top: doc.clientHeight,
+      })
+    const elements = new Set()
+    for (const r of roots) {
+      if (r !== document) elements.add(r)
+      for (const el of r.querySelectorAll('*')) elements.add(el)
+    }
+    let checked = 0
+    for (const el of elements) {
+      if (inMap(el) || el.parentElement?.closest(SCROLL_X_OK)) continue
+      if (el instanceof SVGElement && !(el instanceof SVGSVGElement)) continue
+      const r = el.getBoundingClientRect()
+      if (r.width === 0 && r.height === 0) continue // display: none / contents
+      if (stuckOut.some((p) => p.contains(el))) continue
+      checked++
+      if (scrolls(el) && !el.matches(SCROLL_X_OK) && el.scrollWidth > el.clientWidth + TOL)
+        fail(el, `scrolls sideways: content ${el.scrollWidth - el.clientWidth} px too wide`, r)
+      const holder = holderOf(el)
+      // a map popup must fit its map; otherwise the children of a clipping box are its own
+      // business: scroll boxes are checked just above, overflow: hidden clips on purpose
+      // (ellipsis, progress bars, the map)
+      const mustFit = el.matches('.leaflet-popup-content-wrapper')
+      if (!mustFit && holder && clips(holder) && (scrolls(holder) || !holder.matches(PANEL)))
+        continue
+      const s = spanOf(holder)
+      const over = Math.max(s.left - r.left, r.right - s.right)
+      if (over > TOL) {
+        stuckOut.push(el)
+        fail(
+          el,
+          `sticks out of ${holder ? describe(holder) : 'the viewport'} by ${Math.round(over)} px`,
+          r,
+        )
+      }
+    }
+    return { checked, failures: out }
+  }
+  const layout = layoutFailures()
+
   const candidates = [...all].filter((el) => !skip(el) && visible(el))
-  const failures = []
+  const failures = [...layout.failures]
   const later = []
   for (const el of candidates) {
     const v = visibleRect(el)
@@ -277,6 +377,18 @@ function hitTest(scopeSelectors) {
       })
       continue
     }
+    if (!fully(v)) {
+      // part of the box stays outside the viewport or a clipping panel even when scrolled to
+      const cut = Math.round(v.r.width - v.w + (v.r.height - v.h))
+      failures.push({
+        control: describe(el),
+        reason: `clipped: ${cut} px of the control stay outside the viewport or its panel`,
+        x: Math.round(v.r.left),
+        y: Math.round(v.r.top),
+        hit: null,
+      })
+      continue
+    }
     const f = probe(el, v)
     if (f)
       failures.push({ control: describe(el), reason: 'covered (after scrolling into view)', ...f })
@@ -288,7 +400,7 @@ function hitTest(scopeSelectors) {
       el.scrollTop = 0
       el.scrollLeft = 0
     }
-  return { checked: candidates.length, failures }
+  return { checked: candidates.length, layoutChecked: layout.checked, failures }
 }
 
 // ---------------------------------------------------------------- scenario helpers
@@ -344,13 +456,37 @@ async function dispatchFromMap(page) {
     [0.6, 0.4],
     [0.4, 0.45],
     [0.5, 0.7],
+    [0.35, 0.65],
+    [0.65, 0.6],
+    [0.5, 0.35],
   ]
+  // A click on a marker, label, popup or map control opens that instead of arming an incident
+  // (on a phone the city's markers cover much of the map): only click open map.
+  const onOpenMap = (x, y) =>
+    page.evaluate(
+      ([px, py]) =>
+        !document
+          .elementFromPoint(px, py)
+          ?.closest(
+            '.leaflet-marker-pane, .leaflet-popup-pane, .leaflet-tooltip-pane, ' +
+              '.leaflet-control-container, .map-controls, .leaflet-interactive',
+          ),
+      [x, y],
+    )
+  let armed = false
   for (const [fx, fy] of offsets) {
-    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy)
-    if (await submit.isVisible({ timeout: 800 }).catch(() => false)) break
+    const x = box.x + box.width * fx
+    const y = box.y + box.height * fy
+    if (!(await onOpenMap(x, y))) continue
+    await page.mouse.click(x, y)
+    // isVisible() does not wait: wait for the form to re-render with the armed incident
+    armed = await submit
+      .waitFor({ state: 'visible', timeout: 1500 })
+      .then(() => true)
+      .catch(() => false)
+    if (armed) break
   }
-  if (!(await submit.isVisible().catch(() => false)))
-    throw new Error('map click did not arm a pending incident')
+  if (!armed) throw new Error('map click did not arm a pending incident')
   await submit.click({ timeout: 5000 })
   await page.waitForSelector(`${TOAST_REGION} >> text=/dispatched/i`, { timeout: 8000 })
   await page.waitForTimeout(250) // entry transition, if any
@@ -382,15 +518,18 @@ async function main() {
       viewport: vp,
       state,
       checked: res.checked,
+      layoutChecked: res.layoutChecked ?? 0,
       failures: res.failures,
       screenshot: shot,
     })
     const mark = res.failures.length ? `FAIL ${res.failures.length}` : 'ok'
     console.log(
-      `  ${city.padEnd(9)} ${vp.padEnd(9)} ${state.padEnd(26)} ${String(res.checked).padStart(3)} controls  ${mark}`,
+      `  ${city.padEnd(9)} ${vp.padEnd(9)} ${state.padEnd(26)} ${String(res.checked).padStart(3)} controls ${String(res.layoutChecked ?? 0).padStart(4)} boxes  ${mark}`,
     )
     for (const f of res.failures.slice(0, 6))
-      console.log(`      - ${f.control} ${f.reason} at (${f.x},${f.y}) by ${f.hit}`)
+      console.log(
+        `      - ${f.control} ${f.reason} at (${f.x},${f.y})${f.hit ? ` by ${f.hit}` : ''}`,
+      )
     if (res.failures.length > 6) console.log(`      ... ${res.failures.length - 6} more`)
   }
   const fail = (city, vp, state, err) =>
@@ -591,6 +730,7 @@ async function main() {
     states: results.length,
     failedStates: failed.length,
     controlsChecked: results.reduce((n, r) => n + r.checked, 0),
+    layoutBoxesChecked: results.reduce((n, r) => n + r.layoutChecked, 0),
     failures: results.reduce((n, r) => n + r.failures.length, 0),
     seconds: Math.round((Date.now() - t0) / 1000),
     cspViolations: [...cspViolations],
@@ -599,6 +739,7 @@ async function main() {
   writeFileSync(join(o.out, 'results.json'), JSON.stringify({ summary, results }, null, 2))
   console.log(
     `\n${summary.states} states, ${summary.controlsChecked} control checks, ` +
+      `${summary.layoutBoxesChecked} layout box checks, ` +
       `${summary.failures} failures in ${summary.failedStates} states (${summary.seconds} s). ` +
       `Screenshots + results.json in ${o.out}`,
   )

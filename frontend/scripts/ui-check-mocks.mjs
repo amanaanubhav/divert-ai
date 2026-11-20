@@ -4,7 +4,9 @@
 // destination hospital, a RESPONSE leg with a speed advisory, a unit on scene, a unit at the
 // hospital waiting for its RETURN plan ("planning route"), a RETURN leg, the five junction
 // states and a free-left junction. History details have legs, a hospital choice and route
-// choices with alternative geometries; analytics have the trip-leg metrics.
+// choices with alternative geometries; analytics have the trip-leg metrics. Station, junction
+// and description texts include very long real-style names (see LONG_NAMES) and station ids
+// look like the real ones, so the layout checks see real-length text.
 
 const CITIES = [
   {
@@ -36,6 +38,64 @@ const CITIES = [
 export const CITY_IDS = CITIES.map((c) => c.id)
 
 const SERVICES = ['AMBULANCE', 'FIRE_ENGINE', 'POLICE']
+/** Station ids look like the real ones (OSM node/way id with a service prefix). */
+const ID_PREFIX = { AMBULANCE: 'Hn', FIRE_ENGINE: 'Fw', POLICE: 'Pn' }
+const SHORT_KIND = { AMBULANCE: 'Hospital', FIRE_ENGINE: 'Fire Station', POLICE: 'Police Station' }
+/**
+ * Very long real-style station names (UI mock text, not OSM data): real OSM names in all three
+ * cities run past 80 characters. The first ones of each service are the homes of the live
+ * units and (second ambulance name) the transport hospital, so every Live panel, the drawer
+ * and analytics have to truncate or wrap them.
+ */
+const LONG_NAMES = {
+  delhi: {
+    AMBULANCE: [
+      'NGO Lok Kalyan Samiti Charitable Dispensary and Twenty Four Hour Ambulance Service Centre',
+      'Sir Ganga Ram Hospital Multi Speciality Emergency and Trauma Centre Old Rajinder Nagar',
+    ],
+    FIRE_ENGINE: [
+      'Delhi Fire Service Headquarters Fire Station and Disaster Management Training Centre Connaught Place',
+    ],
+    POLICE: [
+      'Police Station Rajouri Garden West District Delhi Police with Women Help Desk and Cyber Cell',
+    ],
+  },
+  kolkata: {
+    AMBULANCE: [
+      'Ramakrishna Mission Seva Pratishthan Vivekananda Institute of Medical Sciences Sarat Bose Road',
+      'Calcutta Medical College and Hospital Emergency and Trauma Care Centre College Street',
+    ],
+    FIRE_ENGINE: [
+      'West Bengal Fire and Emergency Services Head Office Fire Station Free School Street',
+    ],
+    POLICE: [
+      'Kolkata Police Park Street Police Station with Women Grievance Cell and Traffic Guard',
+    ],
+  },
+  bengaluru: {
+    AMBULANCE: [
+      'Sri Sathya Sai Institute of Higher Medical Sciences Super Speciality Hospital Whitefield',
+      'Bowring and Lady Curzon Medical College and Research Institute Hospital Shivajinagar',
+    ],
+    FIRE_ENGINE: [
+      'Karnataka State Fire and Emergency Services Head Quarters Fire Station Cubbon Road',
+    ],
+    POLICE: ['Bengaluru City Police High Grounds Police Station with Women Help Desk Sampige Road'],
+  },
+}
+/** A long junction name (first corridor junction of every leg, every 9th signal). */
+const LONG_JUNCTION =
+  'Outer Ring Road and Mahatma Gandhi Marg junction below the flyover near the Inter State Bus Terminal'
+
+/** Station `k` (0-based within its service) of a city: long, short or unnamed (null). */
+function stationName(cityId, service, k, unnamed) {
+  if (unnamed) return null
+  const long = (LONG_NAMES[cityId] ?? LONG_NAMES.delhi)[service][k]
+  return (
+    long ??
+    `${['Central', 'North', 'South', 'East', 'West', 'Old Town'][k % 6]} ${SHORT_KIND[service]}`
+  )
+}
 const TYPES = ['MEDICAL', 'FIRE', 'CRIME']
 const SERVICE_FOR_TYPE = { MEDICAL: 'AMBULANCE', FIRE: 'FIRE_ENGINE', CRIME: 'POLICE' }
 const PREFIX = { AMBULANCE: 'AMB', FIRE_ENGINE: 'FIRE', POLICE: 'PCR' }
@@ -131,7 +191,7 @@ function corridorFor(route, cum, signals, offset = 0, { freeLeft = false } = {})
     const free = freeLeft && movement === 'LEFT'
     return {
       signal_id: signals[offset + k]?.id ?? `J${offset + i}`,
-      name: k % 2 === 0 ? `${['Ring Road', 'MG Road', 'Park Street', 'ITO'][k]} crossing` : null,
+      name: k === 0 ? LONG_JUNCTION : k === 2 ? 'Park Street crossing' : null,
       pos: route[i],
       along_m: along,
       offset_m: free ? 14 : 2,
@@ -194,7 +254,10 @@ function candidate(label, distance, timeS, route, extra = {}) {
     right_turns: label === 'A' ? 1 : 2,
     contention_junctions: [],
     incident_zones: [],
-    congested_road: label === 'A' ? 'Janpath' : 'Ring Road',
+    congested_road:
+      label === 'A'
+        ? 'Janpath'
+        : 'Pandit Pant Marg and Baba Kharak Singh Marg stretch near Gurudwara Bangla Sahib',
     route,
     ...extra,
   }
@@ -231,17 +294,8 @@ function buildCity(id) {
     const service = SERVICES[i % 3]
     const total = 2 + (i % 3)
     stations.push({
-      id: `${service[0]}${i}`,
-      name:
-        i % 5 === 4
-          ? null
-          : `${['Central', 'North', 'South', 'East', 'West', 'Old Town'][i % 6]} ${
-              service === 'AMBULANCE'
-                ? 'Hospital'
-                : service === 'FIRE_ENGINE'
-                  ? 'Fire Station'
-                  : 'Police Station'
-            }`,
+      id: `${ID_PREFIX[service]}${10050577769 + i * 7919}`,
+      name: stationName(id, service, Math.floor(i / 3), i % 5 === 4),
       service,
       location: inner(city, r, 0.8),
       osm: `node/${1000 + i}`,
@@ -253,7 +307,7 @@ function buildCity(id) {
   for (let i = 0; i < 60; i++)
     signals.push({
       id: `J${100 + i}`,
-      name: i % 3 ? null : `Junction ${i}`,
+      name: i % 9 === 0 ? LONG_JUNCTION : i % 3 ? null : `Junction ${i}`,
       location: inner(city, r, 0.9),
       osm_node_ids: [i],
     })
@@ -289,7 +343,7 @@ function buildCity(id) {
       description:
         i % 4 === 0
           ? [
-              '2 injured, left lane blocked',
+              '2 injured after a bus and an autorickshaw collided at the service road entry, left lane blocked, crowd gathering',
               'Smoke from 3rd floor',
               'Shop break-in reported',
               'Elderly person collapsed',

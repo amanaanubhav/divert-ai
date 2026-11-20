@@ -12,19 +12,32 @@ npm run typecheck    # tsc -b --noEmit
 npm test             # vitest (jsdom)
 npm run build        # tsc -b && vite build -> dist/
 npm run format:check # prettier
-npm run check:ui     # after build: real-browser check that no control is covered (see below)
+npm run check:ui     # after build: real-browser check that no control is covered or cut off (see below)
 ```
 
 ## UI check
 
 `npm run check:ui` (`scripts/clickability.mjs`) opens Live, History and Analytics for each
 city at six viewports (360 to 1920 px wide) in the locally installed Microsoft Edge (via
-`playwright-core`, a dev-only dependency; no browser download, nothing shipped) and asserts
-that `document.elementFromPoint` at the centre of every visible control hits that control:
-nothing covers it. It repeats this with a vehicle selected (its "Why this route" open), a
-signal popup open, a dispatch toast, the API-key popover, the History drawer, and a route
-explainer open inside the drawer. That is 11 states per city and viewport, 198 in all.
-The mocks (`scripts/ui-check-mocks.mjs`) carry every trip-leg state:
+`playwright-core`, a dev-only dependency; no browser download, nothing shipped). For every
+visible control it asserts that:
+
+- `document.elementFromPoint` at its centre hits the control: nothing covers it;
+- its whole bounding box can be shown: inside the viewport and inside every scrolling panel
+  that holds it (scrolled into view if needed), so nothing is cut off at a panel edge.
+
+In every state it also checks the layout:
+
+- the page never scrolls, sideways or down (the shell is one viewport tall and `<main>` scrolls);
+- no scrolling panel overflows sideways, except boxes marked `data-scroll-x` (wide tables
+  on a phone; `Panel scrollX`);
+- every panel lies inside the viewport and inside the column or panel that holds it, and
+  nothing sticks out of a panel.
+
+It repeats this with a vehicle selected (its "Why this route" open), a signal popup open, a
+dispatch toast, the API-key popover, the History drawer, and a route explainer open inside
+the drawer. That is 11 states per city and viewport, 198 in all. The mocks
+(`scripts/ui-check-mocks.mjs`) carry every trip-leg state:
 
 - a TRANSPORT leg with a patient and its destination hospital
 - a RESPONSE leg with a speed advisory
@@ -32,9 +45,21 @@ The mocks (`scripts/ui-check-mocks.mjs`) carry every trip-leg state:
 - a unit at the hospital planning its RETURN leg
 - a RETURN leg
 - the five junction states
-- a free left By default it serves `dist/` with `vite preview` and mocks the API and
-  WebSocket; `-- --url http://localhost:8080` checks the running stack instead (POST/DELETE
-  stay mocked). Screenshots and `results.json` land in `.ui-check/` (gitignored).
+- a free left
+- very long real-style station, junction and incident texts (e.g. "Sir Ganga Ram Hospital
+  Multi Speciality Emergency and Trauma Centre Old Rajinder Nagar") and real-style ids
+  (`AMB-Hn10050577769-1`): real OSM names run past 80 characters
+
+By default it serves `dist/` with `vite preview` and mocks the API and WebSocket;
+`-- --url http://localhost:8080` checks the running stack instead (POST/DELETE stay
+mocked). Screenshots and `results.json` land in `.ui-check/` (gitignored).
+
+**Long names.** Every column, panel and row is `min-w-0`; the Live right column's own
+grid has an explicit `minmax(0,1fr)` track (an implicit `auto` track grows to the longest
+unbroken name and pushed the Cancel buttons off-screen). Names truncate with an ellipsis and
+keep the whole text in a `title` tooltip, or wrap where there is room (drawer, explainer).
+Every scroll box is `relative`, so absolutely positioned `sr-only` labels stay inside it
+instead of making the document taller than the viewport.
 
 ## Look
 
@@ -92,8 +117,10 @@ WCAG AA and colour-blind separation). Layers: `src/lib/zIndex.ts`.
   - free-left passes and re-routes
   - dispatches by trip status
 
-Alternatives are drawn only when the backend sends their geometry (`route_choice.candidates[].route`).
-The current backend records each candidate's cost but not its geometry, so the explainer says that instead of drawing anything.
+Alternatives are drawn from `route_choice.candidates[].route`, the simplified `[[lat, lng], ...]`
+polyline the backend stores with every candidate (docs/api.md). Route choices recorded before
+that field existed have no geometry: the explainer then says the alternatives cannot be drawn
+(and names any single alternative without one when the others can be drawn).
 
 ## Contract
 

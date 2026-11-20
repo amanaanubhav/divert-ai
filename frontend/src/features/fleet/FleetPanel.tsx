@@ -113,10 +113,12 @@ function FleetRow({
   const driving = v.status === 'EN_ROUTE'
   const phase = phaseOf(v)
   const progress = v.distance_m > 0 ? Math.min(1, v.along_m / v.distance_m) : 0
+  const destination = destinationText(v)
+  const home = `Unit of ${stationLabel(station, v.station_id)}`
   return (
     <li
       className={clsx(
-        'border-l-[3px]',
+        'min-w-0 border-l-[3px]',
         selected ? 'border-l-accent bg-primary-subtle' : 'border-l-transparent',
       )}
     >
@@ -125,14 +127,18 @@ function FleetRow({
         onClick={onSelect}
         aria-pressed={selected}
         className={clsx(
-          'focus-inset w-full px-3 pb-1 pt-2.5 text-left',
+          'focus-inset w-full min-w-0 px-3 pb-1 pt-2.5 text-left',
           !selected && 'hover:bg-subtle',
         )}
       >
-        <div className="flex items-center justify-between gap-2">
+        {/* wraps: the unit id (real ids are ~20 characters) stays whole; the phase and ETA move
+            under it when the column is narrow */}
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1">
           <span className="flex min-w-0 items-center gap-2">
             <ServiceDot service={v.service} />
-            <span className="truncate font-mono text-sm font-semibold text-fg">{v.id}</span>
+            <span className="truncate font-mono text-sm font-semibold text-fg" title={v.id}>
+              {v.id}
+            </span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
             <PhaseChip phase={phase} />
@@ -148,10 +154,12 @@ function FleetRow({
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted">
           {v.leg ? <LegTag kind={v.leg.kind} service={v.service} /> : null}
-          <span className="truncate">{destinationText(v)}</span>
+          <span className="min-w-0 truncate" title={destination}>
+            {destination}
+          </span>
         </div>
-        <div className="mt-0.5 truncate text-xs text-muted">
-          Unit of {stationLabel(station, v.station_id)}
+        <div className="mt-0.5 truncate text-xs text-muted" title={home}>
+          {home}
         </div>
         {driving ? (
           <div
@@ -176,7 +184,7 @@ function FleetRow({
           {v.reroutes ? <span>re-routed {v.reroutes}×</span> : null}
         </div>
       </button>
-      <div className="space-y-1.5 px-3 pb-2.5 text-xs">
+      <div className="min-w-0 space-y-1.5 break-words px-3 pb-2.5 text-xs">
         <StopNote v={v} phase={phase} simTs={simTs} />
         {next ? (
           <NextMovementBlock next={next} claim={claimView(v, next, signals)} />

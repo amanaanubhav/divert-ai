@@ -89,7 +89,10 @@ export function IncidentsPanel({
             return (
               <li
                 key={inc.id}
-                className={clsx('flex items-start gap-2 px-3 py-2', !active && 'bg-subtle/50')}
+                className={clsx(
+                  'flex min-w-0 items-start gap-2 px-3 py-2',
+                  !active && 'bg-subtle/50',
+                )}
               >
                 <button
                   type="button"
@@ -104,17 +107,28 @@ export function IncidentsPanel({
                     <TypeBadge type={inc.type} />
                     <StatusBadge status={inc.status} />
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted">
-                    <span className="tabular-nums">
+                  <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted">
+                    <span className="shrink-0 tabular-nums">
                       {formatClock(inc.reported_at, city.timezone)}
                     </span>
-                    {vid ? <span className="truncate font-mono">{vid}</span> : null}
+                    {vid ? (
+                      <span className="min-w-0 truncate font-mono" title={vid}>
+                        {vid}
+                      </span>
+                    ) : null}
                   </div>
                   {hospital ? (
-                    <div className="mt-0.5 truncate text-xs text-transport">to {hospital}</div>
+                    <div
+                      className="mt-0.5 truncate text-xs text-transport"
+                      title={`to ${hospital}`}
+                    >
+                      to {hospital}
+                    </div>
                   ) : null}
                   {inc.description ? (
-                    <div className="mt-0.5 truncate text-xs text-muted">{inc.description}</div>
+                    <div className="mt-0.5 truncate text-xs text-muted" title={inc.description}>
+                      {inc.description}
+                    </div>
                   ) : null}
                 </button>
                 {active ? (
@@ -135,7 +149,7 @@ export function IncidentsPanel({
                       aria-disabled="true"
                       aria-describedby={hintId}
                       title={CANCEL_BLOCKED_HINT}
-                      className="cursor-not-allowed opacity-55"
+                      className="shrink-0 cursor-not-allowed opacity-55"
                       onClick={() => toast.info('Cannot cancel', CANCEL_BLOCKED_HINT)}
                       aria-label={`Cancel ${inc.type.toLowerCase()} incident (not possible: patient on board)`}
                     >
@@ -145,6 +159,7 @@ export function IncidentsPanel({
                     <Button
                       size="sm"
                       variant="secondary"
+                      className="shrink-0"
                       onClick={() => setConfirming(inc.id)}
                       disabled={cancel.isPending && cancel.variables === inc.id}
                       aria-label={`Cancel ${inc.type.toLowerCase()} incident`}

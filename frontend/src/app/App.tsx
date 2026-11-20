@@ -103,13 +103,15 @@ export function App() {
       </header>
 
       {/* The content area scrolls on its own (stacked layouts on small screens); the toasts
-          are anchored to its top, below the header. */}
+          are anchored to its top, below the header. Every scroll box is `relative` so that
+          absolutely positioned content (sr-only labels) stays inside it instead of making
+          the document taller than the viewport (the header would scroll away). */}
       <div className="relative min-h-0 flex-1">
         <main
           id="main"
           role="tabpanel"
           aria-labelledby={`tab-${tab}`}
-          className="h-full overflow-y-auto"
+          className="relative h-full overflow-y-auto"
           tabIndex={-1}
         >
           {data ? (

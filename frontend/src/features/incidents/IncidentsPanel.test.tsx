@@ -74,6 +74,34 @@ describe('IncidentsPanel', () => {
     expect(urlOf(spy.mock.calls[0]?.[0])).toMatch(/\/api\/v1\/cities\/delhi\/incidents\/r1$/)
   })
 
+  it('truncates a long real hospital name and keeps it whole in a tooltip', () => {
+    const long =
+      'Sir Ganga Ram Hospital Multi Speciality Emergency and Trauma Centre Old Rajinder Nagar'
+    const city = {
+      ...DELHI,
+      stations: DELHI.stations.map((s) => (s.id === 'An2' ? { ...s, name: long } : s)),
+    }
+    renderWithProviders(
+      <IncidentsPanel
+        city={city}
+        isLoading={false}
+        incidents={[
+          incident({
+            id: 't1',
+            type: 'MEDICAL',
+            status: 'TRANSPORTING',
+            hospital_station_id: 'An2',
+            description: long,
+          }),
+        ]}
+      />,
+    )
+    const to = screen.getByText(`to ${long}`)
+    expect(to).toHaveClass('truncate')
+    expect(to).toHaveAttribute('title', `to ${long}`)
+    expect(screen.getByText(long)).toHaveAttribute('title', long)
+  })
+
   it('knows which statuses can still be cancelled', () => {
     expect(canCancel('EN_ROUTE')).toBe(true)
     expect(canCancel('ON_SCENE')).toBe(true)

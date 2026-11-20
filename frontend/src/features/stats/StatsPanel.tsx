@@ -75,15 +75,19 @@ export function StatsPanel({
         {feed.length === 0 ? (
           <p className="text-sm text-muted">Waiting for events…</p>
         ) : (
-          <ol className="max-h-40 space-y-1 overflow-y-auto pr-1" aria-label="Recent activity">
+          <ol
+            className="relative max-h-40 space-y-1 overflow-y-auto pr-1"
+            aria-label="Recent activity"
+          >
             {feed.map((f) => (
-              <li key={f.id} className="flex gap-2 text-xs">
+              <li key={f.id} className="flex min-w-0 gap-2 text-xs">
                 <span className="shrink-0 tabular-nums text-muted">
                   {formatClock(f.ts, city.timezone)}
                 </span>
                 <span
+                  title={f.text}
                   className={clsx(
-                    'truncate',
+                    'min-w-0 truncate',
                     f.tone === 'good' && 'text-ok',
                     f.tone === 'warn' && 'text-warn',
                     f.tone === 'bad' && 'text-bad',

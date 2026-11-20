@@ -167,6 +167,7 @@ export function HistoryView({ city }: { city: CityDetail }) {
         title={`Incidents · ${items.length}${q.hasNextPage ? '+' : ''}`}
         className="min-h-[20rem] flex-1"
         bodyClassName="overflow-auto"
+        scrollX
       >
         {rangeInvalid ? (
           <EmptyState>“To” is before “From”.</EmptyState>
@@ -207,7 +208,10 @@ export function HistoryView({ city }: { city: CityDetail }) {
                   <td className="hidden whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted xl:table-cell">
                     {formatLatLng(inc.location)}
                   </td>
-                  <td className="max-w-[16rem] truncate px-3 py-2 text-muted">
+                  <td
+                    className="max-w-[16rem] truncate px-3 py-2 text-muted"
+                    title={inc.description ?? undefined}
+                  >
                     {inc.description ?? ''}
                   </td>
                   <td className="px-3 py-2 text-right">

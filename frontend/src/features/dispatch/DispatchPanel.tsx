@@ -115,7 +115,9 @@ export function DispatchPanel({ city }: { city: CityDetail }) {
             <dd className="min-w-0 text-fg">
               {near ? (
                 <>
-                  <span className="block truncate">{near.station.name ?? near.station.id}</span>
+                  <span className="block truncate" title={near.station.name ?? near.station.id}>
+                    {near.station.name ?? near.station.id}
+                  </span>
                   <span className="text-xs text-muted">
                     {formatDistance(near.distance_m)} straight-line ·{' '}
                     {near.hasFreeUnit ? (
