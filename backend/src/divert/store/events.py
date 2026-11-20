@@ -18,6 +18,8 @@ class CommandType(StrEnum):
 
     START_DISPATCH = "start_dispatch"
     CANCEL_DISPATCH = "cancel_dispatch"
+    LEG_PLANNED = "leg_planned"  # LegPlanner -> leader, keyed by (dispatch_id, seq)
+    ROUTE_REPLACED = "route_replaced"  # re-route, keyed by (dispatch_id, seq, reroute_no)
 
 
 class HistoryEventType(StrEnum):
@@ -28,10 +30,27 @@ class HistoryEventType(StrEnum):
     PREEMPTION_CLAIMED = "preemption_claimed"
     PREEMPTION_RELEASED = "preemption_released"
     PREEMPTION_CONFLICT = "preemption_conflict"
-    ARRIVED = "arrived"
-    CLEARED = "cleared"
+    PREEMPT_TRANSITION = "preempt_transition"  # red truncation began for the claim
+    PREEMPT_GREEN = "preempt_green"  # the claimed phase is green for the vehicle
+    PREEMPT_TIMEOUT = "preempt_timeout"  # max hold exceeded; claim released
+    ARRIVED = "arrived"  # RESPONSE leg reached the scene
+    CLEARED = "cleared"  # scene work done (FIRE / CRIME incident RESOLVED)
     CANCELLED = "cancelled"
     FAILED = "failed"
+    # trip legs (design §5)
+    LEG_PLANNED = "leg_planned"
+    LEG_STARTED = "leg_started"
+    LEG_ENDED = "leg_ended"
+    LEG_PLAN_FAILED = "leg_plan_failed"
+    REROUTED = "rerouted"
+    TRANSPORT_STARTED = "transport_started"
+    ARRIVED_HOSPITAL = "arrived_hospital"
+    HANDOVER_COMPLETE = "handover_complete"  # MEDICAL incident RESOLVED
+    RETURNING = "returning"  # the unit is released from the incident
+    BACK_IN_SERVICE = "back_in_service"  # unit AVAILABLE, dispatch COMPLETED
+    # a cancel the worker could not honour (patient already on board, or the incident was
+    # already resolved): the persister restores the incident status the API overwrote
+    CANCEL_REJECTED = "cancel_rejected"
 
 
 class StreamMessageType(StrEnum):
@@ -42,6 +61,8 @@ class StreamMessageType(StrEnum):
     VEHICLE_ADDED = "vehicle_added"
     VEHICLE_REMOVED = "vehicle_removed"
     INCIDENT_UPDATED = "incident_updated"
+    LEG_CHANGED = "leg_changed"
+    ROUTE_REPLACED = "route_replaced"
 
 
 # The commands stream topic (outbox rows with this topic are relayed to STREAM_COMMANDS).

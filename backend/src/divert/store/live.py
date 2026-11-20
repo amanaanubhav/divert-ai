@@ -57,10 +57,12 @@ def merge_batches(older: CityBatch, newer: CityBatch) -> CityBatch:
         older.signal_sets.pop(sid, None)
     older.signal_dels |= newer.signal_dels
     older.signal_sets.update(newer.signal_sets)
+    older.junction_sets.update(newer.junction_sets)
     older.finished.update(newer.finished)
     older.history.extend(newer.history)
     older.publish.extend(newer.publish)
     older.acks.extend(newer.acks)
+    older.plan_requests.extend(newer.plan_requests)
     older.tick = newer.tick or older.tick
     return older
 
@@ -104,6 +106,8 @@ async def write_city_batch(  # noqa: PLR0912 - one branch per kind of delta
                 p.srem(keys.vehicle_claims(city, vid), *sorted(sigs))
         if b.signal_sets:
             p.hset(sk, mapping={sid: dumps(s) for sid, s in b.signal_sets.items()})
+        if b.junction_sets:
+            p.hset(keys.junctions(city), mapping={s: dumps(g) for s, g in b.junction_sets.items()})
         if b.finished:
             fk = keys.finished_dispatches(city)
             p.zadd(fk, b.finished)
