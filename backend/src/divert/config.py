@@ -5,13 +5,13 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="DIVERT_", env_file=None, extra="ignore", frozen=True
+        env_prefix="DIVERT_", env_file=None, extra="ignore", frozen=True, populate_by_name=True
     )
 
     env: Literal["dev", "test", "staging", "prod"] = "dev"
@@ -47,19 +47,81 @@ class Settings(BaseSettings):
     cities: Annotated[list[str], NoDecode] = ["delhi", "kolkata", "bengaluru"]
     units_per_station: int = Field(default=2, ge=1, le=20)
 
-    # --- Dispatch / corridor / preemption ---------------------------------------------
+    # --- Dispatch / routing (design §2) -------------------------------------------------
     candidate_stations: int = Field(default=3, ge=1, le=10)
+    route_alternatives: int = Field(
+        default=3, ge=1, le=5, description="OSRM alternatives per request (1 = none)"
+    )
+    route_detours: int = Field(
+        default=2, ge=0, le=4, description="via-point detours when OSRM returns < 2 routes"
+    )
+
+    # --- Corridor / pre-emption (design §4) ---------------------------------------------
     corridor_m: float = Field(default=30.0, gt=0, le=200)
-    preempt_lead_s: float = Field(default=45.0, gt=0)
-    preempt_distance_m: float = Field(default=600.0, gt=0)
-    preempt_release_past_m: float = Field(default=20.0, ge=0)
-    conflict_tie_s: float = Field(default=5.0, ge=0)
+    preempt_max_lead_s: float = Field(
+        default=90.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "preempt_max_lead_s", "DIVERT_PREEMPT_MAX_LEAD_S", "DIVERT_PREEMPT_LEAD_S"
+        ),
+        description="never claim with an ETA above this (DIVERT_PREEMPT_LEAD_S: deprecated alias)",
+    )
+    preempt_min_claim_distance_m: float = Field(
+        default=150.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "preempt_min_claim_distance_m",
+            "DIVERT_PREEMPT_MIN_CLAIM_DISTANCE_M",
+            "DIVERT_PREEMPT_DISTANCE_M",
+        ),
+        description="always claim within max(stopping distance + 50 m, this) "
+        "(DIVERT_PREEMPT_DISTANCE_M: deprecated alias)",
+    )
+    preempt_release_past_m: float = Field(default=20.0, ge=0, description="box, 3-4 legs")
+    preempt_release_past_large_m: float = Field(default=30.0, ge=0, description="box, 5+ legs")
+    preempt_max_hold_s: float = Field(default=60.0, gt=0)
+    preempt_recovery_s: float = Field(
+        default=20.0, ge=0, description="green for the most-starved approach after a release"
+    )
+    priority_window_s: float = Field(
+        default=10.0,
+        ge=0,
+        validation_alias=AliasChoices(
+            "priority_window_s", "DIVERT_PRIORITY_WINDOW_S", "DIVERT_CONFLICT_TIE_S"
+        ),
+        description="a better priority rank this close to the earliest ETA wins "
+        "(DIVERT_CONFLICT_TIE_S: deprecated alias)",
+    )
 
     # --- Simulation ----------------------------------------------------------------------
     sim_tick_s: float = Field(default=0.5, gt=0, le=5)
     sim_time_scale: float = Field(default=1.0, gt=0, le=100)
-    scene_time_s: float = Field(default=120.0, ge=0)
+    # Dwell times (design §1). Defaults are realistic ASSUMPTIONS, not measurements:
+    # on-scene care + loading, firefighting, police scene work, ED handover.
+    scene_time_ambulance_s: float = Field(default=480.0, ge=0)
+    scene_time_fire_engine_s: float = Field(default=1200.0, ge=0)
+    scene_time_police_s: float = Field(default=600.0, ge=0)
+    hospital_handover_s: float = Field(default=600.0, ge=0)
+    scene_time_s: float | None = Field(
+        default=None,
+        ge=0,
+        description="DEPRECATED: one scene time for every service; used only for the "
+        "services whose DIVERT_SCENE_TIME_<SERVICE>_S is not set",
+    )
     position_sample_s: float = Field(default=5.0, gt=0)
+
+    # --- Trip legs: planning + dynamic re-routing (design §1, §2) -------------------------
+    leg_plan_backoff_s: float = Field(
+        default=2.0, gt=0, description="first OSRM retry delay; doubles per failure"
+    )
+    leg_plan_backoff_max_s: float = Field(default=60.0, gt=0)
+    hospital_candidates: int = Field(default=6, ge=1, le=20)
+    reroute_min_saving_s: float = Field(default=60.0, ge=0)
+    reroute_max_per_leg: int = Field(default=2, ge=0, le=10)
+    reroute_behind_share: float = Field(
+        default=0.25, ge=0, description="re-route when this share AND reroute_behind_s late"
+    )
+    reroute_behind_s: float = Field(default=60.0, ge=0)
     position_retention_days: int = Field(default=30, ge=1)
 
     # --- Worker / persister / outbox ---------------------------------------------------
@@ -112,6 +174,18 @@ class Settings(BaseSettings):
     @property
     def sqlalchemy_url(self) -> str:
         return self.database_url.get_secret_value()
+
+    def scene_time_for(self, service: str) -> float:
+        """On-scene dwell of a service; the deprecated DIVERT_SCENE_TIME_S applies only to
+        services whose own setting was not given."""
+        field = {
+            "AMBULANCE": "scene_time_ambulance_s",
+            "FIRE_ENGINE": "scene_time_fire_engine_s",
+            "POLICE": "scene_time_police_s",
+        }[str(service)]
+        if field not in self.model_fields_set and self.scene_time_s is not None:
+            return self.scene_time_s
+        return float(getattr(self, field))
 
 
 @lru_cache(maxsize=1)
