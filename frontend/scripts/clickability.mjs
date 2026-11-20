@@ -292,6 +292,9 @@ function hitTest(scopeSelectors) {
 }
 
 // ---------------------------------------------------------------- scenario helpers
+/** A state the live data does not have right now (live mode only). */
+class SkipState extends Error {}
+
 const TOAST_REGION = '[aria-live="polite"]:has([role="status"], [role="alert"])'
 
 /** Set from --real-tiles: wait for real basemap tiles before screenshots. */
@@ -369,6 +372,8 @@ async function main() {
   const results = []
   /** Content-Security-Policy violations seen in any page (fonts, scripts, ...). */
   const cspViolations = new Set()
+  /** States skipped because the live data lacks them (live mode only). */
+  const skipped = []
   const t0 = Date.now()
 
   const record = (city, vp, state, res, shot) => {
@@ -445,14 +450,55 @@ async function main() {
           try {
             await fn()
           } catch (e) {
-            fail(city, vp, state, e)
+            if (e instanceof SkipState) {
+              skipped.push(`${city} ${vp} ${state}: ${e.message}`)
+              console.log(
+                `  ${city.padEnd(9)} ${vp.padEnd(9)} ${state.padEnd(26)} skipped (${e.message})`,
+              )
+            } else fail(city, vp, state, e)
           }
+        }
+        /** Live data may lack a state the mocks always have: skip it there, never in mock mode. */
+        const needs = async (locator, what) => {
+          if (!mockAll && (await locator.count()) === 0)
+            throw new SkipState(`no ${what} in the live data`)
         }
 
         await run('live', async () => {
           await go('live')
           const p = await shot('live')
           record(city, vp, 'live', await page.evaluate(hitTest, null), p)
+        })
+        await run('live+vehicle-why-route', async () => {
+          // select the transporting ambulance: its card shows "Why this route" for the TRANSPORT leg
+          const transporting = page.locator(
+            'section[aria-labelledby="fleet-title"] button[aria-pressed]',
+            { hasText: 'Transporting' },
+          )
+          await needs(transporting, 'transporting vehicle')
+          await transporting.first().click({ timeout: 5000 })
+          const why = page.locator('section[aria-labelledby="fleet-title"] summary').first()
+          await why.waitFor({ timeout: 8000 })
+          await why.click({ timeout: 5000 }) // open it (and hover: alternatives on the map)
+          await page.waitForTimeout(900) // the map flies to the vehicle
+          await settle(page)
+          const p = await shot('live-vehicle')
+          record(city, vp, 'live+vehicle-why-route', await page.evaluate(hitTest, null), p)
+        })
+        await run('live+signal-popup', async () => {
+          await go('live')
+          // a queued junction: its popup lists the claimant queue
+          const queued = page.locator('.sig.is-queued')
+          await needs(queued, 'queued junction')
+          await queued.first().dispatchEvent('click')
+          await page.waitForSelector('.leaflet-popup .sig-pop', { timeout: 5000 })
+          await settle(page)
+          const p = await shot('live-signal-popup')
+          record(city, vp, 'live+signal-popup', await page.evaluate(hitTest, null), p)
+          // close it like an operator would (the close button must be reachable), then start
+          // the dispatch from a freshly fitted map (the popup may have auto-panned it)
+          await page.locator('.leaflet-popup-close-button').first().click({ timeout: 5000 })
+          await go('live')
         })
         await run('live+dispatch-toast', async () => {
           await dispatchFromMap(page)
@@ -507,6 +553,23 @@ async function main() {
             p,
           )
         })
+        await run('history+drawer-why-route', async () => {
+          // the drawer of the first (MEDICAL, transporting) incident: open a "Why this route"
+          const whys = page.locator('[role="dialog"] summary', { hasText: 'Why this route' })
+          await needs(whys, 'route choice in this incident')
+          const why = whys.first()
+          await why.click({ timeout: 5000 })
+          await why.hover()
+          await settle(page)
+          const p = await shot('history-drawer-why')
+          record(
+            city,
+            vp,
+            'history+drawer-why-route',
+            await page.evaluate(hitTest, ['[role="dialog"]', TOAST_REGION]),
+            p,
+          )
+        })
         await run('analytics', async () => {
           await go('analytics')
           const p = await shot('analytics')
@@ -531,6 +594,7 @@ async function main() {
     failures: results.reduce((n, r) => n + r.failures.length, 0),
     seconds: Math.round((Date.now() - t0) / 1000),
     cspViolations: [...cspViolations],
+    skipped,
   }
   writeFileSync(join(o.out, 'results.json'), JSON.stringify({ summary, results }, null, 2))
   console.log(
@@ -538,6 +602,10 @@ async function main() {
       `${summary.failures} failures in ${summary.failedStates} states (${summary.seconds} s). ` +
       `Screenshots + results.json in ${o.out}`,
   )
+  if (skipped.length > 0) {
+    console.log(`Skipped, state not in the live data (${skipped.length}):`)
+    for (const s of skipped) console.log(`  - ${s}`)
+  }
   if (cspViolations.size > 0) {
     console.log(`CSP violations (${cspViolations.size}):`)
     for (const v of cspViolations) console.log(`  - ${v}`)
