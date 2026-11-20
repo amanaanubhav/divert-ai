@@ -68,6 +68,7 @@ erDiagram
         bool active
         varchar emergency "hospitals: OSM emergency yes | no | NULL"
         varchar healthcare "hospitals: OSM healthcare=*"
+        text speciality "hospitals: OSM healthcare:speciality (raw)"
     }
     units {
         varchar id PK "callsign AMB-Hn123-1"
@@ -178,6 +179,7 @@ erDiagram
         float8 waited_s
         varchar outcome "CLEARED | TIMEOUT | CANCELLED | REROUTED"
         varchar phase_state_at_claim "green_extend | red_truncate"
+        smallint conflicts "times queued, CHECK >= 0"
     }
     incident_events {
         bigint id PK
@@ -215,7 +217,7 @@ erDiagram
 | Table | Natural key used by `divert seed` | Notes |
 |---|---|---|
 | `cities` | `id` | bbox, centre, zoom, timezone, 24 hourly congestion factors, average junction delay, OSM provenance in `data_meta` |
-| `stations` | `(osm_type, osm_id)` | hospitals -> AMBULANCE (named only), fire stations -> FIRE_ENGINE, police -> POLICE. Hospitals also carry OSM `emergency` (`yes` / `no` / NULL) and `healthcare` (upserted by the seed): TRANSPORT eligibility excludes `emergency=no` and `healthcare` in dentist / blood_bank / alternative / doctor / birthing_centre |
+| `stations` | `(osm_type, osm_id)` | hospitals -> AMBULANCE (named only), fire stations -> FIRE_ENGINE, police -> POLICE. Hospitals also carry OSM `emergency` (`yes` / `no` / NULL), `healthcare` and `speciality` (OSM `healthcare:speciality`, raw; upserted by the seed): TRANSPORT eligibility excludes `emergency=no`, `healthcare` in dentist / blood_bank / alternative / doctor / birthing_centre and - unless `emergency=yes` - hospitals whose every speciality cannot take an emergency patient (dental, eye, skin, fertility, physiotherapy, diagnostics, alternative medicine) or, untagged, whose name says so before the word "hospital" (Dental, Eye, Netra, ...; `domain/hospitals.py`) |
 | `signals` | `id` = `J<smallest member node id>` | junction-level signals: OSM `traffic_signals` nodes clustered within 40 m |
 | `units` | `(station_id, ordinal)` | `DIVERT_UNITS_PER_STATION` (default 2) per active station; re-seed inserts only missing units and never resets a live unit's status |
 
@@ -231,7 +233,7 @@ planner uses the GiST paths immediately.
 | `incidents` | API (create/cancel), persister (status transitions) | one row per reported incident; one timestamp column per status transition (`transport_started_at`, `at_hospital_at` for MEDICAL) and the destination `hospital_station_id` |
 | `dispatches` | API (in the dispatch transaction), persister (arrival, travel time, status, end) | the whole trip of one unit: `status` moves forward only and ends `COMPLETED` when the unit is back in service (`end_reason` CLEARED / CANCELLED) or `FAILED`; `route` / `predicted_eta_s` / `corridor` / `actual_travel_s` are the RESPONSE leg (compatibility) |
 | `dispatch_legs` | API (RESPONSE, seq 0, in the dispatch transaction), LegPlanner (TRANSPORT / RETURN, **one transaction with the outbox row** of its `leg_planned` command), persister (`started_at`, `ended_at`, `actual_travel_s`, `end_reason`, re-routes) | one row per leg, unique `(dispatch_id, seq)`; the planner answers a re-issued request from this row, so a planned leg is never lost or planned twice. `predicted_eta_s` is re-predicted at departure (the worker's `leg_started`); `*_trip_s` are simulated seconds since the dispatch |
-| `signal_preemptions` | persister | every claim (PREEMPTED or CONFLICT) with the design section 4.6 detail: leg, movement, lane (`L`/`C`/`R`, index from the kerb, total), free left, required lead and its parts, `green_at` / `crossed_at` / `released_at`, `waited_s`, `outcome`, `phase_state_at_claim` |
+| `signal_preemptions` | persister | one row per claim instance (a re-claim after a TIMEOUT, a re-route or on a later leg has its own `event_id`) with the design section 4.6 detail: leg, movement, lane (`L`/`C`/`R`, index from the kerb, total), free left, required lead and its parts, `green_at` / `crossed_at` / `released_at`, `waited_s`, `outcome`, `phase_state_at_claim`. `state` is the claim's final state (PREEMPTED = its phase was served, CONFLICT = still queued when released; the release sets it); `conflicts` counts how often it was queued behind another phase and only grows, so a contested claim that was served later stays contested (analytics `conflicts`) |
 | `incident_events` | API + persister | append-only timeline/audit, idempotent by `event_id` |
 | `vehicle_positions` | persister | sampled track (every `DIVERT_POSITION_SAMPLE_S` sim seconds), PK `(dispatch_id, ts)`, BRIN on `ts`, pruned after `DIVERT_POSITION_RETENTION_DAYS`. `ts` is wall clock; `elapsed_s` is the *simulated* time since the leg started and `leg_seq` the leg (sim time runs `DIVERT_SIM_TIME_SCALE`x and freezes while no worker leads), which the worker uses to rebuild a lost vehicle |
 | `outbox` | API (same transaction as the dispatch / cancel), LegPlanner (same transaction as the leg; also `route_replaced`) | transactional outbox; a relay XADDs unsent rows to `divert:commands` and stamps `sent_at` |
@@ -247,6 +249,7 @@ planner uses the GiST paths immediately.
 - `fk_units_current_dispatch_id_dispatches` is `DEFERRABLE INITIALLY DEFERRED`, so the
   dispatch transaction may insert the dispatch and mark the unit in either order.
 - `ck_signal_preemptions_not_normal`: only non-NORMAL states are history.
+- `ck_signal_preemptions_conflicts`: `conflicts` >= 0.
 - `ck_cities_hourly_24`: exactly 24 congestion factors.
 
 ## Migrations
@@ -257,19 +260,23 @@ planner uses the GiST paths immediately.
 | `0002_dispatch_rebuild` | `dispatches.segment_speeds_mps` + `eta_model` (worker rebuild from PG), `ix_dispatches_city_dispatched` (analytics windows), `ix_outbox_sent_at` (retention) |
 | `0003_position_elapsed` | `vehicle_positions.elapsed_s` (simulated elapsed time per sample, so a rebuild after failover does not count wall-clock gaps as travel time) |
 | `0004_trip_legs` | `dispatch_legs`; unit / incident / dispatch statuses (`dispatches.status`); `incidents.hospital_station_id`, `transport_started_at`, `at_hospital_at`; `signal_preemptions` section 4.6 columns and lane `C`; `vehicle_positions.leg_seq`; `stations.emergency`, `healthcare`. Backfill: every existing dispatch gets its RESPONSE leg (seq 0) from its own columns (`route_choice` from its `dispatched` event); `dispatches.status` = COMPLETED / FAILED when ended, ON_SCENE when arrived, else DISPATCHED; preemption detail from the stage A release payloads, `outcome` from the release reason otherwise. Downgrade maps TRANSPORTING / AT_HOSPITAL / RETURNING back to ON_SCENE and lane C to NULL so the old CHECKs hold |
+| `0005_contested_claims_speciality` | `signal_preemptions.conflicts` (smallint, NOT NULL DEFAULT 0, CHECK >= 0), backfilled from the `preemption_conflict` events of each claim (`payload.claim_event_id`), and 1 for a row still in CONFLICT without one; `stations.speciality` (text, NULL; filled by the next seed). Downgrade drops both |
 
 All are reversible (`alembic downgrade base` is exercised in CI and in the integration
 tests) and an integration test asserts the ORM models and the migrations do not drift.
 `tests/integration/test_migration_0004.py` migrates stage-A-shaped rows (in-flight,
 on-scene, cleared, cancelled, failed dispatches; a lane-C claim) through upgrade ->
-downgrade -> upgrade and checks the backfill and the status mapping.
+downgrade -> upgrade and checks the backfill and the status mapping;
+`test_migration_0005.py` checks the `conflicts` backfill (a claim queued twice then served
+keeps 2) and the round trip.
 
 ## Key queries (in `db/repositories/reference.py`)
 
 ```sql
 -- TRANSPORT candidates: the 6 nearest ELIGIBLE hospitals to the scene (KNN), see
 -- nearest_hospitals(): service = 'AMBULANCE', named, active, emergency IS DISTINCT FROM
--- 'no', healthcare not in the non-acute list
+-- 'no', healthcare not in the non-acute list; the nearest 6 x 4 such rows are then
+-- checked in Python (is_eligible: speciality / name keywords) and the first 6 kept
 
 -- 3 nearest stations of a service that still have a free unit (KNN on the GiST index)
 SELECT s.*, ST_Distance(s.geom, :pt) AS distance_m

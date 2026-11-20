@@ -56,19 +56,19 @@ Rules:
    | Penalties | corridor contention: 10 s (`CONTENTION_DELAY_S`) per junction another live emergency vehicle is expected at within ±20 s |
 
 5. **Pick per station** (`choose`): the cheapest; candidates within 5 % of it prefer fewer signalised RIGHT/SHARP_RIGHT/U_TURN, then fewer contested junctions, then the shorter distance. Then **rank the stations** by their chosen cost (ties: straight-line distance, station id).
-6. **Record** `route_choice` (chosen label, reason, every candidate with distance, free-flow base time, congested time, junction delay, penalties, cost, crowd index = length-weighted mean of `1 − factor`, right turns, contested junctions, incident zones, most congested road). It rides in the `start_dispatch` command (outbox payload), the `dispatched` timeline event payload, the `POST` response (`vehicle.route_choice`) and the incident detail (`dispatches[].route_choice`). Reason examples: `Route B: 1.8 min faster than A (A: Ring Road congested, 2 extra right turns)`, `Route B: within 5% of A, shorter`.
+6. **Record** `route_choice` (chosen label, reason, every candidate with distance, free-flow base time, congested time, junction delay, penalties, cost, crowd index = length-weighted mean of `1 − factor`, right turns, contested junctions, incident zones, most congested road, and `route`: its geometry simplified for drawing - Douglas-Peucker 10 m, tolerance doubled until ≤ 150 points, 5 decimals; `candidate_polyline` in `services/route_choice.py`, stage 5 fix-2). It rides in the `start_dispatch` command (outbox payload), the `dispatched` timeline event payload, the `POST` response (`vehicle.route_choice`) and the incident detail (`dispatches[].route_choice`). Reason examples: `Route B: 1.8 min faster than A (A: Ring Road congested, 2 extra right turns)`, `Route B: within 5% of A, shorter`.
 7. **Lock a unit in rank order.** Inside one transaction, `ReferenceRepository.lock_free_unit` takes the lowest-`ordinal` `AVAILABLE` unit of the best station with `FOR UPDATE SKIP LOCKED`; if every unit was just taken it tries the next station; all exhausted → `409 no_unit_available`.
 
 One incident gets exactly one dispatch. There is no API to add a second unit to an incident.
 
 **Hospital for a TRANSPORT leg** (design section 1.1, `domain/hospitals.py`, `LegPlanner._to_hospital`):
 
-1. eligible = active, named AMBULANCE stations (OSM `amenity=hospital`) except `emergency=no` and `healthcare` ∈ {dentist, blood_bank, alternative, doctor, birthing_centre} (`is_eligible`, `ReferenceRepository.nearest_hospitals`);
+1. eligible = active, named AMBULANCE stations (OSM `amenity=hospital`) except `emergency=no`, `healthcare` ∈ {dentist, blood_bank, alternative, doctor, birthing_centre} and - unless `emergency=yes` - facilities that cannot take an emergency patient (`is_eligible`, `non_emergency_facility`; stage 5 fix-2): every value of their OSM `healthcare:speciality` (`stations.speciality`) is dental, eye, skin / cosmetic, fertility, physiotherapy, diagnostics or alternative medicine (`NON_EMERGENCY_SPECIALITY_STEMS`); untagged, the name has such a word (`NON_EMERGENCY_NAME_WORDS`: Dental, Eye, Netra, Nethralaya, Ayurvedic, Unani, IVF, Diagnostic, ...) **before** the word "hospital" and no general-care words (multi / super speciality, general, medical, trauma, emergency). `ReferenceRepository.nearest_hospitals` applies the tag filters in SQL, reads 4 × the limit by KNN (`HOSPITAL_OVERFETCH`; the measured worst case needs 2 ×) and keeps the first `limit` that pass `is_eligible`;
 2. the `DIVERT_HOSPITAL_CANDIDATES` (6) nearest to the scene (PostGIS KNN) are routed concurrently and scored with the crowd-aware cost; each keeps its best route;
 3. the best `emergency=yes` hospital wins if its cost ≤ `max(180 s, 1.25 × best cost)` (read literally: a confirmed ED within 3 minutes, or within 1.25 × the best), else the cheapest overall; ties: cost, straight-line distance, id;
 4. the choice and every hospital considered are stored as `dispatch_legs.hospital_choice` (`chosen`, `reason`, `ed_tolerance_s`, `candidates[]`).
 
-Snapshot data (regenerated offline from the cached Overpass payloads; ids and counts unchanged): Delhi 847 hospitals (`emergency` yes 36 / no 11 / untagged 800), Kolkata 294 (31 / 5 / 258), Bengaluru 1,086 (108 / 29 / 949).
+Snapshot data (regenerated offline from the cached Overpass payloads; ids and counts unchanged): Delhi 847 hospitals (`emergency` yes 36 / no 11 / untagged 800), Kolkata 294 (31 / 5 / 258), Bengaluru 1,086 (108 / 29 / 949). `healthcare:speciality` is tagged on 71 / 54 / 87 of them; the speciality and name rules exclude 52 (Delhi), 57 (Kolkata, its eye-hospital cluster) and 118 (Bengaluru) hospitals that the tag filters let through.
 
 Fleet: OSM has no fleet data, so the seed gives every active station `DIVERT_UNITS_PER_STATION` units (default 2, range 1–20, `Settings.units_per_station`; `seed_city` in `backend/src/divert/db/seed.py`). This is a modelling assumption.
 
@@ -200,7 +200,7 @@ allowed(x in interval k) = min( cap[k], sqrt(limit[k+1]² + 2·b·(x[k+1] − x)
 
 ### 5.5 Motion per tick
 
-`SpeedProfile.step`, called once per vehicle per tick with `dt = DIVERT_SIM_TICK_S × DIVERT_SIM_TIME_SCALE` simulated seconds (`Worker.tick_once` in `backend/src/divert/worker.py`):
+`SpeedProfile.step`, called once per vehicle per tick with the tick's `dt` simulated seconds - `DIVERT_SIM_TICK_S × DIVERT_SIM_TIME_SCALE`, or at scale 1 the time the tick took (clamped, [section 9.4](#94-simulation-clock-and-time-scale)) - the same `dt` that advances the clock the signal plans read (`Worker.tick_once` in `backend/src/divert/worker.py`):
 
 ```text
 v' = min(v + a·dt, allowed(x))
@@ -296,14 +296,14 @@ Never claims. At each junction ahead within braking range (and whose stop line t
 
 | Event | When | event_id |
 |---|---|---|
-| `preemption_claimed` | first resolution of a new claim | `clm:<dispatch>:<signal>` (`…:<pass>:<attempt>` for a later pass or a re-claim) |
+| `preemption_claimed` | first resolution of a new claim | `clm:<dispatch>:<signal>` (`…:<pass>:<attempt>` for a later pass or a TIMEOUT re-claim, `…:r<reroute_no>` for a claim made after re-routes, `…:s<seq>` on a later leg) |
 | `preempt_transition` | a served claim's phase is not green yet (red truncation) | `ptr:…` |
 | `preempt_green` | the claim's phase is green for it | `pgr:…` |
 | `preemption_conflict` | each time a claim becomes `CONFLICT`; carries `winner`, `expected_green_at` | `cfl:…:<n>` |
 | `preempt_timeout` | max hold exceeded | `pto:…` |
 | `preemption_released` | release, with `reason` (`passed`, `arrived`, `timeout`, `cancelled`, `failed`) and `outcome` | `rel:…` |
 
-Every claim event payload carries the design §4.6 fields (`leg_seq`, `leg_kind`, `pass_no`, `attempt`, `rank`, `phase`, `movement`, `lane_index`, `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `phase_state_at_claim`, `green_at`; release adds `crossed_at`, `waited_s`, `outcome`). Until stage B's migration only `signal_preemptions`' existing columns are filled (a lane `C` is stored as NULL there); everything else lives in `incident_events.payload`.
+Every claim event payload carries the design §4.6 fields (`leg_seq`, `leg_kind`, `pass_no`, `attempt`, `reroute_no`, `conflicts`, `rank`, `phase`, `movement`, `lane_index`, `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `phase_state_at_claim`, `green_at`; release adds `crossed_at`, `waited_s`, `outcome`). Each claim **instance** has its own ids (`simulation.claim_event_id`): a junction released by a re-route (`REROUTED`) and crossed again by the new path is a new claim (`r<reroute_no>` = re-routes applied before it), so the persister keeps both claims and both releases (stage 5 fix-2; they shared ids before and the second was dropped). `conflicts` = times the claim was queued so far: `signal_preemptions` keeps the greatest and the release writes the final `state`, so a claim queued and then served is `PREEMPTED` with `conflicts` ≥ 1 ("contested"); analytics `preemptions.conflicts` counts contested claims, `conflicts_served` those served later. Until stage B's migration only `signal_preemptions`' existing columns are filled (a lane `C` is stored as NULL there); everything else lives in `incident_events.payload`.
 
 ## 8. Lifecycle state machines
 
@@ -404,7 +404,10 @@ stateDiagram-v2
 | `failed` (`fail:`) | `_end`, `Worker._fail_unstarted`, `Worker._rebuild_from_pg` | dispatch ended `FAILED`; incident `FAILED` with reason; unit `AVAILABLE` |
 
 Every leg event id carries the dispatch and the leg `seq`; a claim's ids add `s<seq>` for
-legs after the first, so the same junction claimed on two legs has two rows.
+legs after the first, so the same junction claimed on two legs has two rows (and
+`r<reroute_no>` after a re-route, [section 7.7](#77-events)).
+`transport_started.scene_s` = simulated seconds from the arrival at the scene to the
+TRANSPORT departure (`Vehicle.stopped_s`: the dwell plus any wait for the plan).
 Failure reasons produced by the code: `simulation error: <exception>` (cut to 500 characters), `superseded by a new dispatch`, `invalid start command`, `rebuild failed: <exception>`.
 
 `start_dispatch` and `leg_planned` are idempotent: a duplicate start for a running or
@@ -456,8 +459,12 @@ unit out of `OUT_OF_SERVICE`**.
 
 Dwell is accumulated in simulated seconds (`dwell_s`, legacy `scene_s`) and is not sampled;
 a vehicle rebuilt from PostgreSQL resumes with `dwell_s = min(target, wall time since the
-leg ended × time scale)` (`Worker._rebuild_stopped`). The plan for the next leg is
-requested when the leg ends, so planning overlaps the dwell.
+leg ended × time scale)` and that time added to `trip_s` (`Worker._rebuild_stopped`). The
+plan for the next leg is requested when the leg ends, so planning overlaps the dwell.
+A unit ON_SCENE in a **stage-A** live document (no `dwell_target_s`, no `pending`) is
+upgraded on restore (`SimulationEngine.restore_live`): target = its service's scene time,
+`scene_s` of it already elapsed, and its next leg (TRANSPORT / RETURN) is requested to
+start when the dwell ends - before stage 5 fix-2 its target was 0 and it never got a leg.
 
 ### 9.2 Cancellation (per phase)
 
@@ -491,8 +498,9 @@ est_time_saved_s = preempted_passed × city.avg_junction_delay_s
 
 | Rule | Detail | Code |
 |---|---|---|
-| Step size | `dt = DIVERT_SIM_TICK_S × DIVERT_SIM_TIME_SCALE` simulated seconds per tick. Defaults 0.5 s × 1. Ranges: tick >0–5 s, scale >0–100. | `Worker.tick_once`, `Settings` |
-| Scale 1 | the simulation clock is the wall clock, read each tick; `divert:sim:clock` is not written | `Worker.tick_once`, `Worker._heartbeat` |
+| One clock | every tick advances the simulation clock by the tick's `dt` and moves every vehicle by the same `dt`; the signal plans (`phase_at`), claims, dwells and the RETURN replay read that clock, so motion and signals never drift apart (stage 5 fix-2: at scale 1 the plans used to read the wall clock while vehicles moved a fixed 0.5 s) | `services/sim_clock.py`, `Worker._clock_step` |
+| Step size | scale ≠ 1: `dt = DIVERT_SIM_TICK_S × DIVERT_SIM_TIME_SCALE` simulated seconds per tick. Defaults 0.5 s × 1. Ranges: tick >0–5 s, scale >0–100. The RETURN replay always steps by this nominal value. | `fixed_step`, `Settings`, `SimConfig.step_s` |
+| Scale 1 | the clock follows the wall clock: `dt` = how far it is behind, clamped to [0, 2 × tick] (`MAX_STEPS_PER_TICK`): a late tick simulates the time it took, a longer stall is caught up by the next ticks; behind by more than 30 s (`RESYNC_AFTER_S`, a suspended host) the backlog is skipped, not simulated (warning log). `divert_sim_clock_lag_seconds` shows the lag; `divert:sim:clock` is not written; a new leader starts at wall time | `real_time_step`, `Worker._clock_step`, `Worker._heartbeat` |
 | Scale ≠ 1 | the clock advances by `dt` per tick and is written to `divert:sim:clock` (epoch seconds) every tick, so it survives failover; a new leader resumes from it, or from wall time if absent | `Worker._heartbeat`, `Worker._load_sim_clock` |
 | Freeze | simulated time only advances while a leader ticks; during a leader change it is frozen | `Worker._lead` |
 | Congestion | uses the city-local hour of the simulation clock, in the worker and in the API's dispatch ETA | `congestion_at` |

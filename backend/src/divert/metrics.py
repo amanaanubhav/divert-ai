@@ -53,6 +53,11 @@ TICK_DURATION = Histogram(
 TICK_OVERRUNS = Counter(
     "tick_overruns_total", "Ticks that took longer than the period", namespace=NS
 )
+SIM_CLOCK_LAG = Gauge(
+    "sim_clock_lag_seconds",
+    "Scale 1: how far the sim clock is behind the wall clock after a tick (caught up later)",
+    namespace=NS,
+)
 PREEMPTIONS = Counter(
     "preemptions_total", "Signal claims by initial state", ["city", "state"], namespace=NS
 )

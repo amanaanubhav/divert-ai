@@ -70,7 +70,8 @@ Prometheus text format. API metrics: `divert_http_requests_total{method,route,st
 `divert_history_stream_lag`, `divert_history_stream_pending`, `divert_ws_clients{city}`,
 `divert_rate_limited_total`, `divert_redis_circuit_open{guard}` (1 while request-path Redis
 calls are short-circuited), `divert_redis_circuit_trips_total{guard}`. Worker (`:9100/metrics`): `divert_tick_duration_seconds`,
-`divert_tick_overruns_total`, `divert_worker_is_leader`, `divert_active_vehicles{city}`,
+`divert_tick_overruns_total`, `divert_sim_clock_lag_seconds` (scale 1: how far the sim clock trails
+the wall clock after a tick), `divert_worker_is_leader`, `divert_active_vehicles{city}`,
 `divert_active_signals{city}`, `divert_preemptions_total{city,state}`,
 `divert_preemption_conflicts_total{city}`, `divert_worker_commands_total{type,outcome}`,
 `divert_history_events_total{type}`, `divert_preemption_releases_total{city,outcome}`,
@@ -143,7 +144,9 @@ Request:
                                      "junction_delay_s": 6.0, "penalties_s": 0.0, "cost_s": 79.4,
                                      "crowd_index": 0.31, "signals": 1, "right_turns": 1,
                                      "contention_junctions": [], "incident_zones": [],
-                                     "congested_road": "Janpath"}, "..."]}
+                                     "congested_road": "Janpath",
+                                     "route": [[28.63, 77.21], [28.6293, 77.2131], [28.6271, 77.2166]]},
+                                    "..."]}
   }
 }
 ```
@@ -153,7 +156,12 @@ movement there and the lane advice (lanes from the kerb; `side` / `lane` is `L`,
 `R` - India drives on the left). `route_choice` explains which of the scored candidates
 (OSRM alternatives and detours, all stations) was chosen and why; it is also stored in the
 `dispatched` timeline event and returned in the incident detail (`dispatches[].route_choice`
-and `legs[0].route_choice`). This response is the **RESPONSE leg** (seq 0) only; the
+and `legs[0].route_choice`). Every candidate carries `route`, its geometry for drawing the
+alternatives: `[[lat, lng], ...]` simplified with Douglas-Peucker at 10 m (the tolerance
+doubles until at most 150 points remain), rounded to 5 decimals (about 1.1 m) - at most
+about 3.5 KB per candidate; never used for motion (the chosen route is the leg's full
+`route`). The same field is in every `route_choice` (TRANSPORT / RETURN legs, `rerouted`
+events); `route_choice` recorded before stage 5 fix-2 has no `route`. This response is the **RESPONSE leg** (seq 0) only; the
 TRANSPORT and RETURN legs are planned by the worker when the previous leg ends (see
 *Trip legs* below).
 `eta_s` uses the congestion factor of the city-local hour of the **simulation clock** (the
@@ -243,18 +251,21 @@ Incident fields (incl. `hospital_station_id`, `transport_started_at`, `at_hospit
            "hospital_choice": {"chosen": "Hn123", "reason": "AIIMS: confirmed emergency department, 1.2 min more than ...",
                                "ed_tolerance_s": 640.4,
                                "candidates": [{"station_id": "Hn123", "name": "AIIMS", "location": [28.567, 77.21],
-                                               "emergency": "yes", "healthcare": "hospital", "straight_line_m": 5300.2,
+                                               "emergency": "yes", "healthcare": "hospital", "speciality": null,
+                                               "straight_line_m": 5300.2,
                                                "cost_s": 584.2, "eta_s": 512.3, "distance_m": 6120.4,
                                                "route": "A", "error": null}, "..."]},
            "eta_model": "kinematic-v3", "planned_at": "...", "started_at": "...", "ended_at": "...",
            "end_reason": "ARRIVED", "reroutes": 0, "started_trip_s": 812.5, "ended_trip_s": 1332.5}],
- "hospital": {"id": "Hn123", "name": "AIIMS", "location": [28.567, 77.21], "emergency": "yes", "healthcare": "hospital"},
+ "hospital": {"id": "Hn123", "name": "AIIMS", "location": [28.567, 77.21], "emergency": "yes", "healthcare": "hospital",
+              "speciality": null},
  "preemptions": [{"event_id": "clm:6c0f...:J6720393130", "dispatch_id": "...", "signal_id": "J6720393130",
                   "state": "PREEMPTED", "lane": "R", "approach_bearing": 171.4, "eta_at_claim_s": 44.6,
                   "claimed_at": "...", "released_at": "...", "leg_seq": 0, "movement": "RIGHT",
                   "lane_index": 2, "lanes_total": 2, "free_left": false, "required_lead_s": 21.4,
                   "transition_s": 9.0, "queue_clear_s": 7.4, "green_at": "...", "crossed_at": "...",
-                  "waited_s": 0.0, "outcome": "CLEARED", "phase_state_at_claim": "red_truncate"}],
+                  "waited_s": 0.0, "outcome": "CLEARED", "phase_state_at_claim": "red_truncate",
+                  "conflicts": 0, "contested": false}],
  "timeline": [{"event_id": "rep:31e6...", "dispatch_id": null, "type": "reported", "ts": "...", "payload": {}},
               {"type": "dispatched"}, {"type": "en_route"}, {"type": "preemption_claimed"},
               {"type": "preemption_released"}, {"type": "arrived"}, {"type": "leg_planned"},
@@ -270,10 +281,20 @@ is `SCENE` | `HOSPITAL` | `STATION`; `end_reason` `ARRIVED` | `CANCELLED` | `FAI
 `eta_error_pct` = (actual - predicted) / actual x 100 (the +-10 % guarantee);
 `hospital_choice` only on TRANSPORT (every hospital considered, the chosen one and why);
 `reroutes` counts applied re-routes (the route is then the spliced one).
-`hospital` is the incident's destination hospital (null unless transported).
-Preemption `state` is `PREEMPTED`, or `CONFLICT` if the claim lost a conflict at any time;
+`hospital` is the incident's destination hospital (null unless transported);
+`speciality` is its OSM `healthcare:speciality` (raw, `;`-separated; null when untagged).
+One preemption row per claim instance (a junction claimed again after a TIMEOUT or a
+re-route has its own `event_id`). `state` is the claim's **final** state: `PREEMPTED` (its
+phase was served) or `CONFLICT` (still queued behind another phase when released);
+`conflicts` = how many times it was queued, kept when it is served later, and
+`contested` = `conflicts` > 0 or `state` `CONFLICT` (stage 5 fix-2: a queued claim that was
+then served used to show `PREEMPTED` with no trace of the conflict); `waited_s` = seconds
+it stood at the stop line for its green.
 `lane` is `L` | `C` | `R`; `outcome` `CLEARED` | `TIMEOUT` | `CANCELLED` | `REROUTED`;
 `phase_state_at_claim` `green_extend` | `red_truncate`; `leg_seq` is the leg the claim was on.
+Timeline payloads of claim events also carry `reroute_no` (re-routes of the leg before the
+claim) and `conflicts`. `transport_started.scene_s` = simulated seconds from arrival at the
+scene to the TRANSPORT departure (dwell + wait for the plan; was always 0 before fix-2).
 `est_time_saved_s` is an **estimate** (pre-empted junctions passed x city average delay).
 Timeline types: `reported`, `dispatched`, `cancel_requested`, `en_route`,
 `preemption_claimed`, `preemption_conflict`, `preempt_transition`, `preempt_green`,
@@ -310,7 +331,8 @@ Window on `reported_at` (default: last 24 h; max 366 days).
           "RETURN": {"count": 9, "eta_mape": 0.012, "eta_max_error": 0.035}},
  "free_left_passed": 3,
  "reroutes": 1,
- "preemptions": {"total": 41, "conflicts": 2, "distinct_signals": 30, "top_signals": [{"signal_id": "J...", "count": 4}],
+ "preemptions": {"total": 41, "conflicts": 3, "conflicts_served": 2, "distinct_signals": 30,
+                 "top_signals": [{"signal_id": "J...", "count": 4}],
                  "outcomes": {"CLEARED": 38, "TIMEOUT": 1, "CANCELLED": 2, "REROUTED": 0},
                  "green_extension": 9, "red_truncation": 30},
  "est_time_saved_s": {"total": 1225.0, "note": "estimate: pre-empted junctions passed x city average junction delay"}}
@@ -325,6 +347,9 @@ arrived without a re-route; `eta_mape` mean, `eta_max_error` worst |actual - pre
 actual). `hospitals` = where patients were taken (top 20). `free_left_passed` = free-left
 junction passes on driven legs (never claimed); `reroutes` = re-routes applied.
 `green_extension` / `red_truncation` = claims whose phase was already green / made green.
+`preemptions.conflicts` = contested claims (queued behind another phase at least once),
+whether they were served later or not; `conflicts_served` = those whose phase was then
+served (final state `PREEMPTED`).
 
 ## Live state (Redis, written by the worker leader)
 
@@ -413,6 +438,13 @@ Clients must ignore unknown `type`s and fields.
 
 A vehicle stays on the map (and in `/vehicles`) for its whole trip - dwells, transport
 and the drive back - until `vehicle_removed`. RETURN legs never claim signals.
+
+`sim_ts` is the simulation clock, the ONE clock that moves the vehicles and runs the signal
+plans. At `DIVERT_SIM_TIME_SCALE` = 1 it follows wall time: a tick that ran late simulates
+the time it took (at most two tick periods; the rest is caught up by the next ticks), so
+`sim_ts` can trail `ts` by a moment under load; more than 30 s behind (a suspended host)
+it skips ahead instead. At other scales every tick advances it by `DIVERT_SIM_TICK_S` x
+scale.
 
 `tick` increases by one per worker tick and stays monotonic across worker leader
 changes (a new leader resumes from the last committed `divert:{city}:tick`). It is not a

@@ -123,7 +123,7 @@ The worker leader runs `ticks()` inside `Worker._lead` every `sim_tick_s` = 0.5 
 
 ```mermaid
 flowchart TD
-    S(["tick timer, every 0.5 s"]) --> CLK["sim_now = wall clock (scale 1)<br/>or sim_now + dt_sim (scaled)"]
+    S(["tick timer, every 0.5 s"]) --> CLK["dt_sim = time behind the wall clock, clamped (scale 1)<br/>or sim_tick_s x scale (scaled); sim_now + dt_sim"]
     CLK --> T["engine.tick: tick_no + 1"]
     T --> CITY["for each city with vehicles or previously active signals"]
     CITY --> V{"vehicle status"}
@@ -147,8 +147,16 @@ flowchart TD
 1. **Schedule.** `ticks()` keeps a fixed schedule (`next_at += period`). If a tick runs
    late, it counts `divert_tick_overruns_total` and restarts the schedule from now (no
    burst of catch-up ticks).
-2. **Clock.** `Worker.tick_once`: `dt_sim = sim_tick_s x sim_time_scale`. At scale 1 the
-   sim clock is the wall clock; otherwise it advances by `dt_sim` per tick.
+2. **Clock.** `Worker.tick_once` / `Worker._clock_step` (`services/sim_clock.py`): ONE
+   sim clock, advanced by the same `dt_sim` the vehicles move, so the signal plans
+   (`phase_at`), claims, dwells and the RETURN replay never drift from the motion. Scaled
+   (`sim_time_scale` != 1): `dt_sim = sim_tick_s x sim_time_scale`. Scale 1: `dt_sim` = how
+   far `sim_now` is behind the wall clock, clamped to [0, 2 x `sim_tick_s`] - an
+   overrunning tick simulates the time it took, a longer stall is caught up by the next
+   ticks; more than 30 s behind (suspended host) the backlog is skipped (warning log).
+   `divert_sim_clock_lag_seconds` = the lag left after the tick. (Before stage 5 fix-2,
+   scale 1 set `sim_now` = wall clock but moved vehicles a fixed 0.5 s: under overruns
+   the plans outran the vehicles and the RETURN ETA missed by up to 60 %.)
 3. **Advance.** `SimulationEngine.tick` increments the engine-wide `tick_no`, then calls
    `_advance` for each vehicle:
    - ON_SCENE: `scene_s += dt`; at `scene_time_s` = 120 it calls `_end(..., "cleared")`.
@@ -181,7 +189,8 @@ flowchart TD
 | Redis write fails | The whole batch is kept and merged into the next tick's write; nothing is half-applied | `Worker._flush` |
 | Local lease expired | `LeadershipLost`: the worker steps down and drops its memory (workflow 6) | `Worker._flush` |
 | Heartbeat write fails | Warning only; `/readyz` reports the worker `stale` after 10 s | `Worker._heartbeat` |
-| Tick overrun | Counted; next tick runs immediately | `Worker._lead.ticks` |
+| Tick overrun | Counted; next tick runs immediately. Scale 1: that tick simulates the time it took (at most 2 periods; the rest is caught up later), motion and signal plans together | `Worker._lead.ticks`, `Worker._clock_step` |
+| Stall > 30 s at scale 1 (suspended host) | The backlog is skipped, not simulated: the clock jumps to one step behind the wall clock (warning `sim clock re-synchronised`) | `sim_clock.real_time_step` |
 
 ---
 
@@ -320,8 +329,12 @@ sequenceDiagram
    `_start_leg` then switches route / corridor / destination, resets the per-leg state,
    re-predicts the ETA at departure (the prediction of record, in `leg_started`), and
    publishes `leg_changed` + `vehicle_added`. TRANSPORT also emits `transport_started`
-   (incident TRANSPORTING, `hospital_station_id`). Dwell over without a plan: the vehicle
-   waits in place (`planning: true`).
+   (incident TRANSPORTING, `hospital_station_id`; `scene_s` = simulated seconds from the
+   arrival to this departure, `Vehicle.stopped_s`, taken before the per-leg reset). Dwell
+   over without a plan: the vehicle waits in place (`planning: true`). The destination
+   hospital comes from `ReferenceRepository.nearest_hospitals`: tag filters in SQL, 4 x
+   the limit by KNN, then `is_eligible` (no dental / eye / ... institutes unless
+   `emergency=yes`; [domain rules 2](02-domain-rules.md#2-choosing-the-unit-and-the-route)).
 7. **Back in service.** RETURN arrived (or released at its own station): `_finish` emits
    `back_in_service` (`end_reason` CLEARED or CANCELLED, `trip_s`) and removes the
    vehicle (`vehicle_removed` reason `back_in_service`).
@@ -464,7 +477,10 @@ sequenceDiagram
       `last_tick_no`), so WebSocket tick numbers stay monotonic;
    5. `_restore_from_redis` (vehicles, routes, claims, finished dispatches, active
       signals), dropping vehicles whose dispatch already ended in PostgreSQL or whose route
-      is missing;
+      is missing. Each vehicle goes through `SimulationEngine.restore_live`: a stage-A live
+      document (no `dwell_target_s`) of a unit ON_SCENE is upgraded - dwell target = the
+      service's scene time (`scene_s` of it elapsed), next leg (TRANSPORT / RETURN)
+      pending, re-issued with the other pending requests below;
    6. `_rebuild_from_pg` (workflow 7);
    7. flush the restore batch and log `became leader` with `restored`, `rebuilt`, `tick`.
 5. **Lead.** `Worker._lead` runs `renew` (every TTL/3), `commands` and `ticks` until one
@@ -895,6 +911,12 @@ outbox and XADDs it; otherwise `reroute_answered` lets the next evaluation happe
 the cool-down. `apply_route_replaced` (dispatch + seq + re-route no, at most
 `DIVERT_REROUTE_MAX_PER_LEG` = 2) splices the new route in (`legs.splice`), releases the
 claims not on the new path (`REROUTED`) and emits `rerouted` + WS `route_replaced`.
+A released junction that the new path crosses again is claimed again at a later tick as a
+**new claim instance**: its event ids carry `r<reroute_no>` (`simulation.claim_event_id`),
+so the persister keeps that claim and its `CLEARED` release as their own
+`signal_preemptions` row (stage 5 fix-2; they reused the first claim's ids before and
+were dropped as duplicates). Every candidate in `route_choice` carries its simplified
+geometry (`candidates[].route`, Douglas-Peucker 10 m, at most 150 points).
 
 ### Error branches
 

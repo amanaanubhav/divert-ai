@@ -177,6 +177,7 @@ class Claim:
     conflicts: int = 0  # -1 marks "new": resolution emits preemption_claimed
     pass_no: int = 0
     attempt: int = 0
+    reroute_no: int = 0  # re-routes of the leg applied before this claim was made
     claimed_t: float = 0.0  # sim epoch of the claim
     phase: int = 0
     rank: int = 1
@@ -218,6 +219,7 @@ class Claim:
             "conflicts": self.conflicts,
             "pass_no": self.pass_no,
             "attempt": self.attempt,
+            "reroute_no": self.reroute_no,
             "claimed_t": _r(self.claimed_t, 3),
             "phase": self.phase,
             "rank": self.rank,
@@ -259,6 +261,7 @@ class Claim:
             conflicts=int(d.get("conflicts", 0)),
             pass_no=int(d.get("pass_no", 0)),
             attempt=int(d.get("attempt", 0)),
+            reroute_no=int(d.get("reroute_no", 0)),
             claimed_t=float(d.get("claimed_t", 0.0)),
             phase=int(d.get("phase", 0)),
             rank=int(d.get("rank", 1)),
@@ -353,6 +356,8 @@ class Vehicle:
     _factors_key: tuple[object, ...] | None = None
     _factors: tuple[float, ...] = ()
     _entries: dict[str, CorridorSignal] = field(default_factory=dict)
+    # restored from a stage-A live document (no leg fields): upgraded by engine.restore
+    _stage_a_doc: bool = False
 
     def __post_init__(self) -> None:
         self._entries = {c.key: c for c in self.corridor}
@@ -382,6 +387,15 @@ class Vehicle:
             and self.ready is None
             and self.dwell_s >= self.dwell_target_s
         )
+
+    @property
+    def stopped_s(self) -> float:
+        """Sim seconds since the current leg ended (at the scene: since arrival, the dwell
+        plus any wait for the next leg's plan); 0 while driving."""
+        if self.moving:
+            return 0.0
+        travel = self.travel_s if self.travel_s is not None else self.elapsed_s
+        return max(0.0, self.trip_s - self.leg_started_trip_s - travel)
 
     @property
     def at_scene(self) -> bool:
@@ -644,18 +658,45 @@ class Vehicle:
         v.halt_at_m = _opt_float(live.get("halt_at_m"))
         v.cancelled = bool(live.get("cancelled", False))
         v.released = bool(live.get("released", v.phase is UnitStatus.RETURNING))
-        v.trip_s = float(live.get("trip_s", v.elapsed_s))
+        v.trip_s = float(live.get("trip_s", v.elapsed_s + v.dwell_s))
         v.leg_started_trip_s = float(live.get("leg_started_trip_s", 0.0))
         v.hospital = live.get("hospital")
         v.reroutes = int(live.get("reroutes", 0))
         after = live.get("reroute_after_t")
         v.reroute_after_t = -math.inf if after is None else float(after)
         v.zones_seen = {str(z) for z in live.get("zones_seen", [])}
+        v._stage_a_doc = "dwell_target_s" not in live
         return v
+
+
+def claim_event_id(
+    prefix: str, dispatch_id: str, leg_seq: int, claim: Claim, *extra: object
+) -> str:
+    """Deterministic id of one claim instance's events. A junction pass can be claimed
+    more than once: again after a TIMEOUT (``attempt``), again on the new path after a
+    re-route dropped it (``reroute_no``: the re-routes applied before the claim) and
+    again on a later leg (``leg_seq``); every instance gets its own ids so the persister
+    keeps each claim and its release. The parts of a first claim are omitted, so its
+    ids are unchanged from earlier releases (replays stay de-duplicated)."""
+    parts: list[object] = [dispatch_id, claim.signal_id]
+    if claim.pass_no or claim.attempt:
+        parts += [claim.pass_no, claim.attempt]
+    if claim.reroute_no:
+        parts.append(f"r{claim.reroute_no}")
+    if leg_seq:
+        parts.append(f"s{leg_seq}")
+    return event_id(prefix, *parts, *extra)
 
 
 def _legacy_phase(status: VehicleStatus) -> UnitStatus:
     return UnitStatus.DISPATCHED if status is VehicleStatus.EN_ROUTE else UnitStatus.ON_SCENE
+
+
+def _incident_type(raw: str) -> IncidentType | None:
+    try:
+        return IncidentType(raw)
+    except ValueError:
+        return None
 
 
 def _point(raw: Any) -> LatLng:
@@ -710,8 +751,9 @@ class CityBatch:
 @dataclass(frozen=True, slots=True)
 class SimConfig:
     """``scene_time_s``: on-scene dwell per service (a number = the same for all);
-    ``hospital_handover_s``: dwell at the hospital; ``step_s``: sim seconds per tick
-    (the RETURN ETA replays at this step until the first tick sets the real one)."""
+    ``hospital_handover_s``: dwell at the hospital; ``step_s``: the nominal sim seconds
+    per tick - the RETURN ETA replay always steps by it (a tick's own ``dt`` varies at
+    real-time scale, :mod:`divert.services.sim_clock`)."""
 
     scene_time_s: float | Mapping[ServiceType, float] = 120.0
     position_sample_s: float = 5.0
@@ -754,7 +796,7 @@ class SimulationEngine:
         self._traffic_version = 0
         self._fleet_version = 0  # bumped whenever a vehicle is added, removed or released
         self._last_signal_doc: dict[tuple[str, str], dict[str, Any]] = {}
-        self._step_s = config.step_s  # sim seconds per tick (set by every tick)
+        self._step_s = config.step_s  # sim seconds the last tick advanced (its dt)
         self._sim_t = 0.0  # sim epoch of the last tick (commands apply at this time)
 
     # ----------------------------------------------------------------- helpers
@@ -1044,8 +1086,12 @@ class SimulationEngine:
         recorded (dispatched while no leader was running); event ids are deterministic,
         so an en_route already persisted is de-duplicated. Junction controls are rebuilt
         from the restored claims at the next tick; a pending leg request is re-issued by
-        :meth:`pending_plan_requests`.
+        :meth:`pending_plan_requests`. A vehicle restored from a stage-A live document is
+        upgraded first (:meth:`_upgrade_stage_a`).
         """
+        if v._stage_a_doc:
+            self._upgrade_stage_a(v)
+            v._stage_a_doc = False
         self.city_vehicles(v.city_id)[v.vehicle_id] = v
         self._fleet_version += 1
         if announce_at is not None:
@@ -1056,6 +1102,41 @@ class SimulationEngine:
         for sid, claim in v.claims.items():
             b.claim_sets[(sid, v.vehicle_id)] = claim.to_json(v)
             b.vclaim_adds.setdefault(v.vehicle_id, set()).add(sid)
+
+    def restore_live(
+        self, live: Mapping[str, Any], route_doc: Mapping[str, Any], claims: Mapping[str, Claim]
+    ) -> Vehicle:
+        """Re-insert a vehicle from its Redis live document (leader take-over); a document
+        written before stage B is upgraded on the way (:meth:`restore`)."""
+        v = Vehicle.restore(live, route_doc, claims)
+        self.restore(v)
+        return v
+
+    def _upgrade_stage_a(self, v: Vehicle) -> None:
+        """A stage-A live document has no leg fields. A unit still driving its RESPONSE
+        goes on as usual (its arrival plans the next leg). A unit on scene gets the dwell
+        target it never stored - the service's scene time, of which ``scene_s`` has
+        elapsed - and its next leg (TRANSPORT or RETURN) is requested now, to start when
+        the dwell ends; :meth:`pending_plan_requests` hands the request to the planner.
+        (Without this the dwell target would be 0: the scene cleared at once and no leg
+        ever followed - the unit never came back into service.)"""
+        if v.moving or v.released or v.cancelled or v.phase is not UnitStatus.ON_SCENE:
+            return
+        v.dwell_target_s = self.config.scene_time(v.service)
+        kind = next_leg_kind(
+            LegKind.RESPONSE,
+            service=v.service,
+            incident_type=_incident_type(v.incident_type),
+            cancelled=False,
+        )
+        if kind is not None and v.pending is None:
+            v.pending = self._new_pending(
+                v, kind, v.pos, start_in_s=v.dwell_target_s - min(v.dwell_s, v.dwell_target_s)
+            )
+        log.warning(
+            "upgraded a stage-A vehicle on scene",
+            extra={"dispatch_id": v.dispatch_id, "next_leg": None if kind is None else kind.value},
+        )
 
     def pending_plan_requests(self) -> list[dict[str, Any]]:
         """Plan requests of every vehicle waiting for a leg (a new leader re-issues them;
@@ -1105,8 +1186,19 @@ class SimulationEngine:
     ) -> None:
         """Ask the LegPlanner for the next leg (its seq is fixed here, deterministically).
         A RETURN from the unit's own station is not planned: it is home already."""
-        if kind is LegKind.RETURN and v.at_home(origin):
+        p = self._new_pending(v, kind, origin, start_in_s=start_in_s)
+        if p is None:
             return
+        v.pending = p
+        self.batch(v.city_id).plan_requests.append(self._plan_request(v, p))
+        del wall
+
+    def _new_pending(
+        self, v: Vehicle, kind: LegKind, origin: LatLng, *, start_in_s: float
+    ) -> PendingLeg | None:
+        """The next leg's request (consumes its seq); None for a RETURN from home."""
+        if kind is LegKind.RETURN and v.at_home(origin):
+            return None
         p = PendingLeg(
             seq=v.next_seq,
             kind=kind,
@@ -1115,9 +1207,7 @@ class SimulationEngine:
             start_at=self._sim_t + max(0.0, start_in_s),
         )
         v.next_seq += 1
-        v.pending = p
-        self.batch(v.city_id).plan_requests.append(self._plan_request(v, p))
-        del wall
+        return p
 
     def apply_leg_planned(
         self, cmd: Mapping[str, Any], *, stream_id: str | None, wall: datetime
@@ -1209,6 +1299,7 @@ class SimulationEngine:
     def _start_leg(self, v: Vehicle, plan: LegPlan, wall: datetime) -> None:
         """Begin a planned leg at the vehicle's position (the plan's origin)."""
         sim = datetime.fromtimestamp(self._sim_t, UTC) if self._sim_t else wall
+        scene_s = v.stopped_s  # (before the leg fields are reset)
         self._release_all(v, wall, reason="leg_changed")  # (none held between legs)
         v.set_leg_route(plan.route, plan.corridor)
         v.leg_seq, v.leg_kind, v.emergency = plan.seq, plan.kind, plan.emergency
@@ -1265,7 +1356,7 @@ class SimulationEngine:
                 hospital=plan.hospital,
                 hospital_station_id=plan.dest_station_id,
                 predicted_eta_s=_r(v.predicted_eta_s, 1),
-                scene_s=_r(v.trip_s - v.leg_started_trip_s, 1),
+                scene_s=_r(scene_s, 1),
                 trip_s=_r(v.trip_s, 1),
             )
             self._incident_updated(v, "TRANSPORTING", wall, hospital=plan.hospital)
@@ -1461,7 +1552,11 @@ class SimulationEngine:
 
     # -------------------------------------------------------------------- tick
     def tick(self, *, dt_sim: float, sim: datetime, wall: datetime) -> dict[str, CityBatch]:
-        """Advance every vehicle by ``dt_sim`` simulated seconds; return the batches."""
+        """Advance every vehicle by ``dt_sim`` simulated seconds; return the batches.
+
+        ``sim`` is the sim clock AFTER this step, advanced by the caller by (at least)
+        ``dt_sim`` (:mod:`divert.services.sim_clock`): motion and the signal plans read
+        the same clock, so they never drift apart."""
         self.tick_no += 1
         self._step_s = dt_sim
         self._sim_t = sim.timestamp()
@@ -1524,7 +1619,7 @@ class SimulationEngine:
             signals=None
             if v.emergency
             else RegistrySignals(self.junctions, v.city_id, open_holds=False),
-            step_s=self._step_s,
+            step_s=self.config.step_s,  # a deterministic replay at the nominal step
             rules=self.config.rules,
             passed=frozenset(v.passed),
             stop_for=v.stop_for,
@@ -1534,7 +1629,7 @@ class SimulationEngine:
         if not v.emergency and v.halt_at_m is None:
             t = sim.timestamp()
             if t - v.eta_refresh_t < NON_EMERGENCY_ETA_REFRESH_S:  # decrement in between
-                v.eta_s = max(0.0, v.eta_s - self._step_s)
+                v.eta_s = max(0.0, v.eta_s - self._step_s)  # (the time this tick advanced)
                 return
             v.eta_refresh_t = t
         elif v.halt_at_m is not None:  # braking to a stop after a cancel
@@ -1719,12 +1814,11 @@ class SimulationEngine:
             self._incident_updated(v, "ON_SCENE", wall, travel_s=_r(v.elapsed_s, 1))
             v.phase = UnitStatus.ON_SCENE
             v.dwell_s, v.dwell_target_s = 0.0, self.config.scene_time(v.service)
-            try:
-                itype: IncidentType | None = IncidentType(v.incident_type)
-            except ValueError:
-                itype = None
             kind = next_leg_kind(
-                LegKind.RESPONSE, service=v.service, incident_type=itype, cancelled=v.cancelled
+                LegKind.RESPONSE,
+                service=v.service,
+                incident_type=_incident_type(v.incident_type),
+                cancelled=v.cancelled,
             )
         else:  # TRANSPORT reached the hospital
             self._history(
@@ -1807,12 +1901,7 @@ class SimulationEngine:
         return required_lead(transition_s(status, phase), queue, margin_s=rules.margin_s)
 
     def _claim_event_id(self, prefix: str, v: Vehicle, claim: Claim, *extra: object) -> str:
-        parts: list[object] = [v.dispatch_id, claim.signal_id]
-        if claim.pass_no or claim.attempt:
-            parts += [claim.pass_no, claim.attempt]
-        if v.leg_seq:  # the same junction may be claimed again on a later leg
-            parts.append(f"s{v.leg_seq}")
-        return event_id(prefix, *parts, *extra)
+        return claim_event_id(prefix, v.dispatch_id, v.leg_seq, claim, *extra)
 
     def _update_claims(self, v: Vehicle, wall: datetime, sim: datetime) -> None:
         rules = self.config.rules
@@ -1865,6 +1954,7 @@ class SimulationEngine:
                 conflicts=-1,  # marks "new": resolution emits preemption_claimed
                 pass_no=c.pass_no,
                 attempt=v.attempts.get(key, 0),
+                reroute_no=v.reroutes,
                 claimed_t=t,
                 phase=phase,
                 rank=v.rank,
@@ -1895,6 +1985,8 @@ class SimulationEngine:
             "leg_kind": v.leg_kind.value,
             "pass_no": claim.pass_no,
             "attempt": claim.attempt,
+            "reroute_no": claim.reroute_no,
+            "conflicts": max(0, claim.conflicts),  # times queued so far (kept once served)
             "rank": claim.rank,
             "phase": claim.phase,
             "movement": claim.movement.value,

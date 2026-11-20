@@ -134,7 +134,9 @@ vertices + junction positions + the stop line):
 the allowed speed at `x` inside interval `k` is
 `min(cap_k, sqrt(limit[k+1]^2 + 2 b (x[k+1] - x)))`.
 
-**Motion** (every tick, `dt = DIVERT_SIM_TICK_S x DIVERT_SIM_TIME_SCALE` simulated s):
+**Motion** (every tick, `dt` simulated s - `DIVERT_SIM_TICK_S x DIVERT_SIM_TIME_SCALE`;
+at scale 1 the time the tick actually took, see section 10 - the same `dt` that advances
+the clock the signal plans read):
 `v' = min(v + a dt, allowed(x))`, then with a speed advisory `v' = min(v', max(adv, v - b dt))`,
 `x' = x + (v + v') / 2 * dt`, `v' = min(v', allowed(x'))`. A vehicle never passes an
 active stop line (clamped and stopped within 0.3 m). Arrival when `x >= length - 0.5 m`.
@@ -157,7 +159,9 @@ traffic factors** as the simulation:
   waits the vehicle will actually have, unless another vehicle's pre-emption changes a
   junction's plan meanwhile. The planner pins the junction geometry the simulation uses
   (`PlanSignals`); while driving, the engine replays every 5 s against its registry and
-  decrements in between. (`kinematic-v2` added the expected wait `red_share x red / 2`
+  decrements in between. The replay always steps by the nominal tick
+  (`DIVERT_SIM_TICK_S x DIVERT_SIM_TIME_SCALE`), so a prediction does not depend on how
+  late the last tick ran. (`kinematic-v2` added the expected wait `red_share x red / 2`
   per junction instead; that is an average, and missed +-10 % on short RETURN legs.)
 
 It returns the ETA to the destination and to every corridor entry ahead. The prediction
@@ -242,9 +246,18 @@ average delay.
 
 ## 10. Clock, sampling, scene
 
-* Simulation clock: wall clock when `DIVERT_SIM_TIME_SCALE = 1`; otherwise it advances by
-  `dt` per tick and is persisted in Redis (`divert:sim:clock`) so it survives fail-over.
-  Congestion and the signal plans use this clock.
+* Simulation clock (`services/sim_clock.py`): ONE clock moves the vehicles and runs the
+  signal plans (`phase_at`), claim timing, dwells and the RETURN replay - every tick
+  advances it by the same `dt` the vehicles move. At `DIVERT_SIM_TIME_SCALE` != 1, `dt` =
+  `DIVERT_SIM_TICK_S x scale` per tick and the clock is persisted in Redis
+  (`divert:sim:clock`) so it survives fail-over (an overrunning tick slows the whole
+  simulation down). At scale 1 the clock follows the wall clock: `dt` = how far it is
+  behind, clamped to [0, 2 x `DIVERT_SIM_TICK_S`] - a late tick simulates the time it
+  took, a longer stall is caught up over the next ticks, and a backlog over 30 s
+  (suspended host) is skipped, not simulated (logged; `divert_sim_clock_lag_seconds`).
+  Until stage 5 fix-2 the scale-1 plans read the wall clock while vehicles moved a fixed
+  0.5 s, so overrunning ticks let the plans outrun the vehicles (RETURN error -60 % at
+  50 % overrun; `tests/unit/test_sim_clock.py`). Congestion uses this clock too.
 * Event timestamps (`ts`) are wall clock; durations (`travel_s`, `elapsed_s`) are
   simulated seconds - so analytics stay meaningful at any time scale.
 * Simulated time only advances while a leader ticks: during a leader change (up to the
@@ -257,7 +270,12 @@ average delay.
 * Dwell (simulated seconds, assumptions): on scene `DIVERT_SCENE_TIME_AMBULANCE_S` 480,
   `_FIRE_ENGINE_S` 1200, `_POLICE_S` 600; hospital handover `DIVERT_HOSPITAL_HANDOVER_S`
   600 (`DIVERT_SCENE_TIME_S` is a deprecated fallback for all services). Testers shorten
-  everything with `DIVERT_SIM_TIME_SCALE`.
+  everything with `DIVERT_SIM_TIME_SCALE`. `transport_started.scene_s` records the real
+  time on scene: arrival -> TRANSPORT departure (the dwell plus any wait for the plan).
+* A unit that was ON_SCENE in a stage-A live document (no dwell target, no pending leg)
+  is upgraded when a new leader restores it: dwell target = its service's scene time
+  (`scene_s` of it already elapsed), and its next leg (TRANSPORT or RETURN) is requested
+  to start when the dwell ends.
 
 ## 10a. Trip legs (design section 1)
 
@@ -270,7 +288,11 @@ emergency, ambulance on MEDICAL)] -> RETURN (-> home station, obeys signals). Th
    the vehicle's live state (`pending`);
 2. the planner chooses the destination - TRANSPORT: the 6 nearest **eligible** hospitals
    (PostGIS KNN; not `emergency=no`, not dentist / blood bank / alternative / doctor /
-   birthing centre) routed concurrently and scored with the crowd-aware cost; a confirmed
+   birthing centre; unless `emergency=yes`, not a facility whose every
+   `healthcare:speciality` cannot take an emergency patient - dental, eye, skin,
+   fertility, physiotherapy, diagnostics, alternative medicine - nor, when untagged, one
+   whose name says so before the word "hospital": Dental, Eye, Netra, Nethralaya,
+   Ayurvedic, ...) routed concurrently and scored with the crowd-aware cost; a confirmed
    ED (`emergency=yes`) wins if its cost <= max(180 s, 1.25 x the best), else the cheapest;
    RETURN: the unit's station - scores the route candidates at the start time (RETURN with
    the phase-aware replay), builds the corridor (movements, lanes), and writes the
@@ -300,7 +322,13 @@ behind the plan. The planner routes from a point ~15 s ahead (>= 100 m; not when
 would be left), and sends `route_replaced` (outbox + XADD) only if it saves >= 60 s; at
 most 2 per leg, 60 s cool-down between evaluations. The leader splices the new route in at
 that point (the vehicle never jumps), releases claims not on the new path (`REROUTED`) and
-re-evaluates the rest at the next tick.
+re-evaluates the rest at the next tick. A junction released this way and crossed again by
+the new path is claimed again as a new claim instance: claim event ids carry
+`r<reroute_no>` (the re-routes applied before the claim) besides the pass, the TIMEOUT
+attempt and the leg, so the persister keeps the second claim and its CLEARED release
+(before stage 5 fix-2 they reused the first claim's ids and were dropped as duplicates).
+Route candidates are recorded with a simplified polyline (`route_choice.candidates[].route`,
+Douglas-Peucker 10 m, at most 150 points) so the UI can draw the alternatives.
 
 ## 11. Limitations and calibration
 

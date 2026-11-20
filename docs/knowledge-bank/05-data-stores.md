@@ -68,6 +68,9 @@ erDiagram
         bigint osm_id UK
         geography geom "Point 4326, GiST"
         bool active
+        varchar emergency "hospitals: yes, no or NULL (rev 0004)"
+        varchar healthcare "hospitals: OSM healthcare (rev 0004)"
+        text speciality "hospitals: OSM healthcare:speciality (rev 0005)"
     }
     units {
         varchar id PK "callsign e.g. AMB-Hn123-1"
@@ -113,9 +116,10 @@ erDiagram
         uuid dispatch_id FK
         varchar signal_id FK
         varchar city_id FK
-        varchar state "PREEMPTED or CONFLICT"
+        varchar state "final: PREEMPTED or CONFLICT"
         timestamptz claimed_at
         timestamptz released_at
+        smallint conflicts "times queued, rev 0005"
     }
     incident_events {
         bigint id PK
@@ -162,7 +166,7 @@ erDiagram
 | `incidents` | One row per report; one timestamp column per status transition | `id` uuid | `ix_incidents_city_reported` `(city_id, reported_at DESC, id DESC)` (keyset), `ix_incidents_city_status`, `ix_incidents_geom` **GiST** | `ck_incidents_type`, `ck_incidents_status` | api (insert as `DISPATCHED`; cancel), persister (forward-only status changes) | api (history, analytics), worker (rebuild join) |
 | `dispatches` | One unit sent to one incident: the **whole trip** (`status` DISPATCHED -> ... -> COMPLETED / FAILED, open until the unit is back in service); route geometry, corridor, per-segment speeds and predicted vs actual of the RESPONSE leg | `id` uuid | `ix_dispatches_route` **GiST**, `uq_dispatches_active_unit` **partial unique** `(unit_id) WHERE ended_at IS NULL`, `ix_dispatches_active_city` **partial** `WHERE ended_at IS NULL`, `ix_dispatches_city_dispatched`, `ix_dispatches_incident_id` | `ck_dispatches_non_negative`, `ck_dispatches_end_reason` (CLEARED, CANCELLED, FAILED), FK → incidents `CASCADE` | api (insert), persister (forward-only `status`, `arrived_at`, `actual_travel_s`, `est_time_saved_s`, `ended_at`, `end_reason`; all `COALESCE` = first write wins) | api, worker (`active_dispatches`, `ended_dispatch_ids`) |
 | `dispatch_legs` | One row per leg: RESPONSE (seq 0) / TRANSPORT / RETURN with origin, destination (+ kind, station), route, speeds, corridor, `route_choice`, `hospital_choice`, prediction of record vs actual (simulated), `started/ended_trip_s`, `end_reason`, `reroutes` | `id`; `uq_dispatch_legs_dispatch_id_seq` | `ix_dispatch_legs_route` **GiST**, `ix_dispatch_legs_destination_station` | `ck_dispatch_legs_seq`, `ck_dispatch_legs_non_negative`, `ck_..._kind`, `ck_..._destination_kind`, `ck_..._end_reason`; FK -> dispatches `CASCADE`, -> stations `RESTRICT` | api (RESPONSE, in the dispatch transaction); LegPlanner (TRANSPORT / RETURN, in one transaction with the outbox row of its `leg_planned` command); persister (`started_at`, `ended_at`, `actual_travel_s`, `end_reason`, re-routes; first write wins) | api (incident detail, analytics), LegPlanner (a re-issued request is answered from the row), worker (`active_dispatches` rebuild per leg) |
-| `signal_preemptions` | Every claim (PREEMPTED or CONFLICT) with lane, approach bearing, ETA at claim and the design section 4.6 detail (`leg_seq`, `movement`, `lane_index` / `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `green_at`, `crossed_at`, `waited_s`, `outcome`, `phase_state_at_claim`); `released_at` closes it | `id`; `event_id` unique (the **claim** event id) | `uq_signal_preemptions_event_id`, `ix_signal_preemptions_dispatch_id`, `ix_signal_preemptions_signal_claimed`, `ix_signal_preemptions_city_claimed` | `ck_signal_preemptions_not_normal` (`state <> 'NORMAL'`), `ck_..._state`, `ck_..._lane` (L, R, C), `ck_..._movement`, `ck_..._outcome`, `ck_..._phase_state_at_claim` | persister | api (detail, analytics) |
+| `signal_preemptions` | One row per claim **instance** (a re-claim after a TIMEOUT, a re-route or on a later leg has its own claim event id) with lane, approach bearing, ETA at claim and the design section 4.6 detail (`leg_seq`, `movement`, `lane_index` / `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `green_at`, `crossed_at`, `waited_s`, `outcome`, `phase_state_at_claim`); `released_at` closes it. `state` is the final state (the release writes it): PREEMPTED = served, CONFLICT = still queued; `conflicts` (rev 0005) = times queued, only grows - a claim queued and then served stays "contested" | `id`; `event_id` unique (the **claim** event id) | `uq_signal_preemptions_event_id`, `ix_signal_preemptions_dispatch_id`, `ix_signal_preemptions_signal_claimed`, `ix_signal_preemptions_city_claimed` | `ck_signal_preemptions_not_normal` (`state <> 'NORMAL'`), `ck_signal_preemptions_conflicts` (`conflicts >= 0`), `ck_..._state`, `ck_..._lane` (L, R, C), `ck_..._movement`, `ck_..._outcome`, `ck_..._phase_state_at_claim` | persister | api (detail, analytics) |
 | `incident_events` | Append-only timeline and audit trail | `id`; `event_id` unique | `uq_incident_events_event_id`, `ix_incident_events_incident_ts` | FK → incidents and dispatches `CASCADE` | api (`rep:`, `dsp:`, `cxr:` events), persister (every worker event except positions) | api (timeline) |
 | `vehicle_positions` | Sampled track, one row every `position_sample_s` = 5 simulated seconds, on every leg (`leg_seq`; `along_m` / `elapsed_s` are per leg) | PK `(dispatch_id, ts)` | `ix_vehicle_positions_ts_brin` **BRIN** on `ts` | FK → dispatches `CASCADE` | persister (insert; retention delete) | api (tracks), worker (latest row per active dispatch via `LATERAL`, for rebuild) |
 | `outbox` | Transactional outbox for worker commands ([ADR-003](04-decisions.md#adr-003-transactional-outbox-for-worker-commands)) | `id` identity | `ix_outbox_unsent` **partial** `(id) WHERE sent_at IS NULL`, `ix_outbox_sent_at` **partial** `WHERE sent_at IS NOT NULL` | none | api (insert in the dispatch or cancel transaction; relay sets `sent_at`, `attempts`, `last_error`), persister (retention delete) | api (relay, `divert_outbox_backlog`) |
@@ -176,7 +180,7 @@ The key spatial and locking queries are written out in [data-model.md](../data-m
 
 ### 2.4 Migration history
 
-Alembic scripts live in `backend/src/divert/migrations/versions/`. Head is `0004_trip_legs` (the compose `migrate` service applies it on `docker compose up`).
+Alembic scripts live in `backend/src/divert/migrations/versions/`. Head is `0005_contested_claims_speciality` (the compose `migrate` service applies it on `docker compose up`).
 
 | Revision | File | Adds |
 |---|---|---|
@@ -184,6 +188,7 @@ Alembic scripts live in `backend/src/divert/migrations/versions/`. Head is `0004
 | `0002_dispatch_rebuild` | `20261117_0002_dispatch_rebuild.py` | `dispatches.segment_speeds_mps double[] NOT NULL DEFAULT '{}'` and `dispatches.eta_model varchar(32)`, so the worker can rebuild a vehicle from PG; `ix_dispatches_city_dispatched` for analytics windows; `ix_outbox_sent_at` (partial) for the retention sweep |
 | `0003_position_elapsed` | `20261117_0003_position_elapsed.py` | `vehicle_positions.elapsed_s double` (nullable): simulated seconds since dispatch, so a rebuild after fail-over does not count wall-clock gaps as travel time. Older rows fall back to a wall-clock estimate (`worker.py` `Worker._vehicle_from_pg`) |
 | `0004_trip_legs` | `20261117_0004_trip_legs.py` | `dispatch_legs`; unit statuses + TRANSPORTING / AT_HOSPITAL / RETURNING (and the busy CHECK); incident statuses + TRANSPORTING / AT_HOSPITAL, `hospital_station_id`, `transport_started_at`, `at_hospital_at`; `dispatches.status`; `signal_preemptions` section 4.6 columns, lane `C`; `vehicle_positions.leg_seq`; `stations.emergency` (CHECK yes/no) and `healthcare`. **Backfill:** a RESPONSE leg (seq 0) per existing dispatch from its own columns (+ `route_choice` from its `dispatched` event), `dispatches.status` from `ended_at` / `end_reason` / `arrived_at`, preemption detail from the stage A release payloads (`outcome` from the release reason otherwise). **Downgrade** maps the new statuses to ON_SCENE and lane C to NULL first, so the old CHECKs hold. Proven on a copy of the dev database and on a fresh one: upgrade, `alembic check`, downgrade 0003, upgrade, `alembic check` (`tests/integration/test_migration_0004.py` covers the backfill) |
+| `0005_contested_claims_speciality` | `20261120_0005_contested_claims_speciality.py` | `signal_preemptions.conflicts smallint NOT NULL DEFAULT 0` + `ck_signal_preemptions_conflicts` (>= 0). **Backfill:** per claim, the number of its `preemption_conflict` events (`payload->>'claim_event_id'`); a row still `CONFLICT` without one gets 1. `stations.speciality text` (NULL until the next seed fills it from the snapshots). **Downgrade** drops both (`tests/integration/test_migration_0005.py`: backfill, round trip, no drift) |
 
 Every revision is reversible. CI runs `divert migrate`, then `alembic upgrade head && alembic check`, then `alembic downgrade base && alembic upgrade head` (`.github/workflows/ci.yml` job `backend-integration`). `tests/integration/test_migrations.py::test_models_match_migration` fails if the ORM and the migrations drift.
 
@@ -243,7 +248,7 @@ Two notes from the running compose stack:
 |---|---|---|
 | Live vehicle (`vehicles` hash field) | `id`, `dispatch_id`, `incident_id`, `city`, `service`, `station_id`, `incident_type`, `status` (`EN_ROUTE`, `ON_SCENE`), `pos` [lat, lng], `heading`, `along_m`, `distance_m`, `speed_mps`, `eta_s`, `predicted_eta_s`, `elapsed_s`, `scene_s`, `travel_s`, `preempted_passed`, `passed` [signal ids], `samples`, `started_at`, `destination`, `claims` [signal ids] | `services/simulation.py` `Vehicle.live_json` |
 | Route document (`route:<vehicle>`) | `dispatch_id`, `route` {`points`, `segment_speeds_mps`, `distance_m`, `osrm_distance_m`, `osrm_duration_s`}, `corridor` [{`signal_id`, `name`, `pos`, `along_m`, `offset_m`, `lane`, `approach_bearing`}], `destination` | `Vehicle.route_json`, `domain/route.py` `Route.to_json`, `CorridorSignal.to_json` |
-| Claim (`claims:<signal>` field) | `signal_id`, `vehicle_id`, `dispatch_id`, `service`, `event_id` (`clm:…`), `state` (`PREEMPTED`, `CONFLICT`), `eta_s`, `eta_at_claim_s`, `lane` (`L`, `R`), `approach_bearing`, `pos`, `claimed_at`, `conflicts` | `Claim.to_json` |
+| Claim (`claims:<signal>` field) | `signal_id`, `vehicle_id`, `dispatch_id`, `service`, `event_id` (`clm:…`), `state` (`PREEMPTED`, `CONFLICT`), `eta_s`, `eta_at_claim_s`, `lane` (`L`, `C`, `R`), `approach_bearing`, `pos`, `claimed_at`, `conflicts`, `pass_no`, `attempt`, `reroute_no` (re-routes of the leg before the claim; part of its event ids), the section 4.6 fields | `Claim.to_json` |
 | Active signal (`signals:active` field) | `signal_id`, `state`, `pos`, `vehicle_id` and `service` (the winner), `lane`, `approach_bearing`, `eta_s`, `claimants` [{`vehicle_id`, `service`, `eta_s`, `state`}] | `SimulationEngine._resolve_city` |
 
 ### 3.4 Streams and consumer groups
@@ -273,8 +278,8 @@ Every stream entry has **one field, `data`**, holding a JSON object that starts 
 |---|---|---|---|
 | `en_route` | `enr:<dispatch>` | `station_id`, `service`, `predicted_eta_s`, `distance_m` | Incident → `EN_ROUTE`, `en_route_at` |
 | `vehicle_position` | `pos:<dispatch>:<n>` | `pos`, `speed_mps`, `along_m`, `elapsed_s`, `sample` | `vehicle_positions` row keyed `(dispatch_id, ts)`; no `incident_events` row |
-| `preemption_claimed` | `clm:<dispatch>:<signal>` | claim fields + `eta_s` | `signal_preemptions` insert |
-| `preemption_conflict` | `cfl:<dispatch>:<signal>:<n>` | claim fields + `winner`, `eta_s` | That row's state → `CONFLICT` |
+| `preemption_claimed` | `clm:<dispatch>:<signal>` (+ `:<pass>:<attempt>`, `:r<reroute_no>`, `:s<leg_seq>` for later instances, `simulation.claim_event_id`) | claim fields + `eta_s` | `signal_preemptions` insert |
+| `preemption_conflict` | `cfl:<dispatch>:<signal>:<n>` | claim fields + `winner`, `eta_s` | That row's state → `CONFLICT`, `conflicts` = the greater of row and event |
 | `preemption_released` | `rel:<dispatch>:<signal>` | claim fields + `released_at`, `reason` (`passed`, `arrived`, `cleared`, `cancelled`, `failed`) | `released_at` (earliest wins; the row is inserted if missing) |
 | `arrived` | `arr:<dispatch>` | `pos`, `travel_s`, `predicted_eta_s`, `est_time_saved_s`, `preempted_passed` | Dispatch `arrived_at`, `actual_travel_s`, `est_time_saved_s`; incident `ON_SCENE`; unit `ON_SCENE` |
 | `cleared` | `clr:<dispatch>` | `scene_s` | Dispatch ended `CLEARED`; incident `RESOLVED`; unit `AVAILABLE` if still on this dispatch |
@@ -308,7 +313,7 @@ Pub/sub is fire-and-forget. After a reconnect, or when a client's queue (256 mes
 |---|---|---|
 | Leader lock | `divert:worker:leader` | `SET NX PX 5000`; renewed every TTL/3 with `WATCH` + `GET` + `MULTI PEXPIRE`; released with `WATCH` + `DEL`. Only the owner of the token can renew or release. Local validity is `renewal + TTL − TTL/5`. **No fencing token** |
 | Heartbeat | `divert:worker:heartbeat` | Written after each tick with `EXPIRE 3600`. `/readyz` calls the worker `ok` if `ts` is at most 10 s old, otherwise `stale`, or `missing` if the key is absent |
-| Sim clock | `divert:sim:clock` | Written only when `DIVERT_SIM_TIME_SCALE` ≠ 1. The leader advances `sim_now` by `sim_tick_s × sim_time_scale` per tick. The api predicts ETAs at the city-local hour of this clock and falls back to wall time |
+| Sim clock | `divert:sim:clock` | Written only when `DIVERT_SIM_TIME_SCALE` ≠ 1. The leader advances `sim_now` by `sim_tick_s × sim_time_scale` per tick. At scale 1 `sim_now` is not stored: it follows the wall clock, advanced each tick by the clamped time the tick took (`services/sim_clock.py`) - the same `dt` the vehicles move. The api predicts ETAs at the city-local hour of this clock and falls back to wall time |
 | OSRM route cache | `divert:osrm:driving:*` | Read and written through the request-path guard; a failure is treated as a cache miss. TTL 3600 s |
 | Rate limit | `divert:rl:mutate:*` | `INCR` + `EXPIRE 120` in one `MULTI`. Allowed while the count ≤ `rate_limit_per_min` (60). Fails open |
 
@@ -343,6 +348,7 @@ Files live at `backend/src/divert/cities/data/<city>.json`: `delhi.json` (195 KB
 | `stations[].id` | `H`, `F` or `P` (service) + `n`, `w` or `r` (OSM element type) + OSM id (`cities/osm.py` `extract_stations`) |
 | `stations[].name` | Required for AMBULANCE (unnamed hospitals are skipped). May be `null` otherwise |
 | `stations[].osm` | `"<type>/<id>"`, split into `osm_type` and `osm_id` on seed |
+| `stations[].emergency`, `healthcare`, `speciality` | AMBULANCE only: OSM `emergency` (`yes` / `no` / null), `healthcare` and `healthcare:speciality` (raw, `;`-separated; stage 5 fix-2, extracted offline from the cached Overpass payloads - ids and counts unchanged). Seeded into `stations`; TRANSPORT eligibility reads them (`domain/hospitals.py`) |
 | `signals[].id` | `J` + smallest member node id; `osm` lists every member node clustered within 40 m |
 | `pos`, `center` | `[lat, lng]`; station positions rounded to 6 decimal places |
 | `traffic` | **Not OSM data:** hand-set approximations (`meta.traffic_profile_note`) |

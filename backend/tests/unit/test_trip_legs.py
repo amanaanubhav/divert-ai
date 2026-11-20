@@ -15,8 +15,9 @@ from redis.asyncio import Redis
 from divert.domain.enums import IncidentType, LegKind, ServiceType, UnitStatus
 from divert.domain.geo import destination_point, haversine_m, interpolate_by_distance
 from divert.services.legs import route_replaced_command
-from divert.services.simulation import SimulationEngine, Vehicle, VehicleStatus
+from divert.services.simulation import Claim, SimulationEngine, Vehicle, VehicleStatus
 from divert.store import redis_store as keys
+from divert.store.events import event_id
 from tests.support import (
     Clock,
     city,
@@ -185,6 +186,23 @@ def test_medical_chain_runs_every_leg_and_frees_the_unit_last(clock: Clock) -> N
     assert out.of("back_in_service")[0]["end_reason"] == "CLEARED"
     ids = [e["event_id"] for e in out.history]
     assert len(ids) == len(set(ids))
+
+
+def test_transport_started_records_the_real_time_on_scene(clock: Clock) -> None:
+    """Stage 5 fix-2 B4: scene_s = arrival -> TRANSPORT departure (the 20 s dwell plus the
+    30 s the unit waited for its plan), not 0."""
+    eng = engine(scene_time_s=20.0, hospital_handover_s=20.0)
+    v = start(eng, clock, straight_route(C, n=10))
+    out = Out()
+    until(eng, clock, out, lambda: v.phase is UnitStatus.ON_SCENE)
+    step(eng, clock, out, ticks=100)  # 50 s on scene, nobody answers the plan request
+    assert v.stopped_s == pytest.approx(50.0, abs=0.01)
+    (req,) = eng.pending_plan_requests()
+    assert eng.apply_leg_planned(stub_leg_command(req), stream_id=None, wall=clock.now)
+    drained(eng, clock, out)
+    (ts,) = out.of("transport_started")
+    assert ts["scene_s"] == pytest.approx(50.0, abs=0.01)
+    assert v.stopped_s == 0.0  # driving the TRANSPORT leg
 
 
 def test_fire_responds_then_returns(clock: Clock) -> None:
@@ -431,6 +449,53 @@ def test_a_transport_is_never_dropped_as_not_needed(clock: Clock) -> None:
     assert v.pending is not None
 
 
+# live-document fields stage B added (a stage-A leader never wrote them)
+STAGE_B_ONLY = frozenset({
+    "phase", "leg", "destination_info", "planning", "incident_location", "home", "home_road",
+    "dwell_s", "dwell_target_s", "next_seq", "pending", "plan_error", "halt_at_m",
+    "cancelled", "released", "trip_s", "leg_started_trip_s", "hospital", "reroutes",
+    "reroute_after_t", "zones_seen",
+})  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("service", "itype", "next_kind"),
+    [(ServiceType.FIRE_ENGINE, "FIRE", "RETURN"), (ServiceType.AMBULANCE, "MEDICAL", "TRANSPORT")],
+)
+def test_a_stage_a_unit_on_scene_finishes_its_dwell_and_gets_its_next_leg(
+    clock: Clock, service: ServiceType, itype: str, next_kind: str
+) -> None:
+    """Stage 5 fix-2 B3: a unit ON_SCENE in a stage-A live document (no dwell target, no
+    pending leg) used to clear at once and never get a leg (stuck forever). It now dwells
+    for the rest of the service's scene time, then drives its next leg and is freed."""
+    old = engine(scene_time_s=600.0)
+    v = start(old, clock, straight_route(C, n=10), service=service, incident_type=itype)
+    until(old, clock, Out(), lambda: not v.moving)
+    live = {k: x for k, x in v.live_json().items() if k not in STAGE_B_ONLY}
+    live["scene_s"] = 30.0  # 30 s into its 600 s on scene when the stack was upgraded
+
+    eng = engine(scene_time_s=600.0, hospital_handover_s=20.0)
+    nv = eng.restore_live(live, {"route": v.route.to_json(), "corridor": []}, {})
+    assert (nv.phase, nv.dwell_s, nv.dwell_target_s) == (UnitStatus.ON_SCENE, 30.0, 600.0)
+    assert nv.trip_s == pytest.approx(v.elapsed_s + 30.0, abs=0.01)
+    (req,) = eng.pending_plan_requests()  # what the new leader hands to the planner
+    assert (req["kind"], req["seq"]) == (next_kind, 1)
+    assert req["start_at"] - req["requested_t"] == pytest.approx(570.0)
+    out = Out()
+    step(eng, clock, out, ticks=1138)  # 569 s: still on scene, nothing cleared yet
+    assert nv.phase is UnitStatus.ON_SCENE
+    assert not nv.released
+    assert eng.apply_leg_planned(stub_leg_command(req), stream_id=None, wall=clock.now)
+    until(eng, clock, out, gone(eng), answer=stub_answer())
+    types = out.types()
+    assert types[-1] == "back_in_service"
+    assert (out.of("leg_started")[0]["kind"], out.of("leg_started")[0]["seq"]) == (next_kind, 1)
+    if next_kind == "TRANSPORT":
+        assert out.of("transport_started")[0]["scene_s"] == pytest.approx(600.0, abs=0.6)
+    else:
+        assert out.of("cleared")[0]["scene_s"] == pytest.approx(600.0)
+
+
 def test_the_road_point_survives_a_restore(clock: Clock) -> None:
     eng = engine()
     route = straight_route(C, n=6)
@@ -488,6 +553,45 @@ def test_route_replaced_releases_claims_off_the_new_path(clock: Clock) -> None:
     assert not eng.apply_route_replaced(late, stream_id=None, wall=clock.now)
     until(eng, clock, out, gone(eng), answer=stub_answer())
     assert out.of("leg_ended", seq=0)[0]["reroutes"] == 1
+
+
+def test_a_junction_reclaimed_after_a_reroute_gets_its_own_event_ids(clock: Clock) -> None:
+    """Stage 5 fix-2 B1: a junction dropped by a re-route and crossed again by the new
+    path is claimed again; that second claim and its CLEARED release must not reuse the
+    first claim's ids (the persister would drop them as duplicates)."""
+    eng = engine(scene_time_s=5.0)
+    route = straight_route(C, bearing=90.0, n=60)  # 3 km east, junction S20 at 1 km
+    v = start(eng, clock, route, corridor_at(route, [20]))
+    out = Out()
+    until(eng, clock, out, lambda: "S20" in v.claims and v.claims["S20"].conflicts >= 0)
+    at_m = v.along_m + 120.0
+    assert at_m < route.cumulative[20]  # S20 lies beyond the re-route point: released
+    origin, _ = interpolate_by_distance(route.points, route.cumulative, at_m)
+    new = route_through([origin, route.points[20], route.destination])
+    i20 = min(range(len(new.points)), key=lambda i: haversine_m(new.points[i], route.points[20]))
+    (c,) = corridor_at(new, [i20])
+    same = type(c)("S20", c.pos, c.along_m, c.offset_m, c.lane, c.approach_bearing)
+    cmd = route_replaced_command(
+        city_id="delhi", dispatch_id=v.dispatch_id, vehicle_id=v.vehicle_id, seq=0,
+        reroute_no=1, origin_along_m=at_m, route=new, corridor=[same], saved_s=90.0,
+        old_remaining_s=300.0, new_remaining_s=210.0, reason="test", route_choice=None,
+    )  # fmt: skip
+    assert eng.apply_route_replaced(cmd, stream_id=None, wall=clock.now)
+    drained(eng, clock, out)
+    assert "S20" not in v.claims
+    until(eng, clock, out, lambda: "S20" in v.claims)
+    held = v.claims["S20"]  # the re-claim on the new path, as a new leader restores it
+    assert Claim.from_json(json.loads(json.dumps(held.to_json(v)))).reroute_no == 1
+    until(eng, clock, out, gone(eng), answer=stub_answer(corridor_every=None))
+    claimed = out.of("preemption_claimed", signal_id="S20")
+    released = out.of("preemption_released", signal_id="S20")
+    assert [(e["reroute_no"], e["leg_seq"]) for e in claimed] == [(0, 0), (1, 0)]
+    assert [e["outcome"] for e in released] == ["REROUTED", "CLEARED"]
+    assert claimed[0]["event_id"] == event_id("clm", v.dispatch_id, "S20")  # unchanged
+    assert claimed[1]["event_id"] == event_id("clm", v.dispatch_id, "S20", "r1")
+    assert [e["claim_event_id"] for e in released] == [e["event_id"] for e in claimed]
+    ids = [e["event_id"] for e in out.history]
+    assert len(ids) == len(set(ids)), "every event id unique: nothing de-duplicated"
 
 
 def test_a_new_fire_zone_ahead_triggers_a_reroute_request(clock: Clock) -> None:

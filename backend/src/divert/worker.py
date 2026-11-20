@@ -67,6 +67,7 @@ from divert.metrics import (
     PREEMPTION_PHASE_STATE,
     PREEMPTIONS,
     SIGNALS_STARVED,
+    SIM_CLOCK_LAG,
     TICK_DURATION,
     TICK_OVERRUNS,
     WORKER_IS_LEADER,
@@ -77,6 +78,7 @@ from divert.services.legs import PendingLeg, is_home
 from divert.services.planner import LegPlanner, Router
 from divert.services.preemption import PreemptionRules
 from divert.services.routing import OsrmRouter
+from divert.services.sim_clock import Step, fixed_step, real_time_step
 from divert.services.simulation import (
     CityBatch,
     Claim,
@@ -329,7 +331,7 @@ class Worker:
                         c = await self.redis.hget(keys.claims(city_id, str(sid)), vid)
                         if c is not None:
                             claims[str(sid)] = Claim.from_json(_loads(c))
-                    engine.restore(Vehicle.restore(live, _loads(route_raw), claims))
+                    engine.restore_live(live, _loads(route_raw), claims)
                     n += 1
                 except (ValueError, KeyError, TypeError) as exc:
                     log.warning(
@@ -437,6 +439,9 @@ class Worker:
         )
         v.leg_seq = leg.seq
         v.next_seq = max(lg.seq for lg in row.legs) + 1
+        # re-routes already applied: the next request gets the next number, and a
+        # re-claim gets the same claim ids as before the rebuild (de-duplicated)
+        v.reroutes = leg.reroutes
         v.dest_kind = leg.destination_kind
         v.dest_station_id = leg.destination_station_id
         v.dest_name = leg.destination_name
@@ -489,8 +494,9 @@ class Worker:
             else min(float(row.last_along_m), v.route.length_m)
         )
         v.travel_s = v.elapsed_s = leg.actual_travel_s or 0.0
-        v.trip_s = leg.ended_trip_s if leg.ended_trip_s is not None else v.trip_s + v.elapsed_s
         since = max(0.0, (wall - leg.ended_at).total_seconds()) * scale if leg.ended_at else 0.0
+        ended = leg.ended_trip_s if leg.ended_trip_s is not None else v.trip_s + v.elapsed_s
+        v.trip_s = ended + since  # the trip clock ran on while it stood here
         if arrived and leg.kind is LegKind.TRANSPORT and not v.released:
             v.phase = UnitStatus.AT_HOSPITAL  # (arrived_hospital may not be persisted yet)
         if arrived and not v.cancelled and not v.released:
@@ -631,16 +637,33 @@ class Worker:
         if engine is None:
             return {}
         started = time.perf_counter()
-        dt_sim = self.settings.sim_tick_s * self.settings.sim_time_scale
-        if self.settings.sim_time_scale == 1.0:
-            self.sim_now = self.wall_clock()
-        else:
-            self.sim_now += timedelta(seconds=dt_sim)
-        batches = engine.tick(dt_sim=dt_sim, sim=self.sim_now, wall=self.wall_clock())
+        wall = self.wall_clock()
+        step = self._clock_step(wall)
+        # ONE sim clock: the vehicles move step.dt_s and the signal plans read the clock
+        # advanced by the same dt (stage 5 fix-2 B2: at scale 1 the plans used to read
+        # the wall clock while vehicles moved a fixed 0.5 s, so overrunning ticks let the
+        # plans outrun the vehicles)
+        self.sim_now += timedelta(seconds=step.advance_s)
+        batches = engine.tick(dt_sim=step.dt_s, sim=self.sim_now, wall=wall)
         await self._flush(batches)
         await self._heartbeat(engine)
         TICK_DURATION.observe(time.perf_counter() - started)
         return batches
+
+    def _clock_step(self, wall: datetime) -> Step:
+        """This tick's step of the sim clock (:mod:`divert.services.sim_clock`)."""
+        nominal = self.settings.sim_tick_s * self.settings.sim_time_scale
+        if self.settings.sim_time_scale != 1.0:
+            return fixed_step(nominal)
+        behind = (wall - self.sim_now).total_seconds()
+        step = real_time_step(behind, nominal)
+        SIM_CLOCK_LAG.set(max(0.0, behind - step.advance_s))
+        if step.skipped_s > 0.0:
+            log.warning(
+                "sim clock re-synchronised to the wall clock",
+                extra={"behind_s": round(behind, 3), "skipped_s": round(step.skipped_s, 3)},
+            )
+        return step
 
     async def _flush(self, batches: dict[str, CityBatch]) -> None:
         requests: list[dict[str, Any]] = []
