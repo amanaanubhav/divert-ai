@@ -24,11 +24,13 @@ export function StatsPanel({
   const day = useAnalytics(city.id, range.from, range.to)
 
   const { preempted, conflicts, liveSaved } = useMemo(() => {
+    // held for an emergency vehicle (transitioning, pre-empted, queued); recovering is not
     let p = 0
     let c = 0
     for (const s of Object.values(signals)) {
-      if (s.state === 'CONFLICT') c += 1
-      else p += 1
+      if (s.state === 'RECOVERING') continue
+      p += 1
+      if (s.state === 'QUEUED' || s.state === 'CONFLICT') c += 1
     }
     let passed = 0
     for (const v of Object.values(vehicles)) passed += v.preempted_passed ?? 0
@@ -43,8 +45,13 @@ export function StatsPanel({
       <div className="grid grid-cols-2 gap-2">
         <Stat label="Vehicles live" value={Object.keys(vehicles).length} />
         <Stat label="Active incidents" value={activeIncidents} />
-        <Stat label="Pre-empted" value={preempted} tone="good" />
-        <Stat label="Conflicts" value={conflicts} tone={conflicts > 0 ? 'warn' : 'default'} />
+        <Stat label="Pre-empted" value={preempted} hint="junctions held now" tone="good" />
+        <Stat
+          label="Queued"
+          value={conflicts}
+          hint="conflicts now"
+          tone={conflicts > 0 ? 'warn' : 'default'}
+        />
         <Stat label="Saved (live)" value={formatSeconds(liveSaved)} hint="estimate" tone="good" />
         <Stat
           label="Resolved · 24 h"

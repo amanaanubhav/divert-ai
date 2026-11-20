@@ -168,15 +168,99 @@
   pointer-events: none;
 }
 
+/* Patient on board (TRANSPORT leg): a small violet badge with a person figure. */
+.veh-patient {
+  display: none;
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--map-transport);
+  border: 1.5px solid #fff;
+}
+.veh.has-patient .veh-patient {
+  display: flex;
+}
+
+/* ------------------------------------------------------------------ trip-leg extras */
+/* Destination hospital of a transport: white square, violet border, "H". */
+.hosp {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--map-transport);
+  border: 2.5px solid var(--map-transport);
+  font:
+    700 13px/1 'Noto Sans',
+    'Segoe UI',
+    Arial,
+    sans-serif;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+}
+.hosp.hosp-legend {
+  width: 14px;
+  height: 14px;
+  font-size: 9px;
+  border-width: 1.5px;
+  box-shadow: none;
+}
+/* "free left": a slip road bypasses the signal, so the junction is never claimed. */
+.free-left {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.free-left-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px dashed var(--map-preempted);
+}
+.free-left-text {
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 4px;
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-ok));
+  padding: 0 4px;
+  font:
+    600 10px/1.5 'Noto Sans',
+    'Segoe UI',
+    Arial,
+    sans-serif;
+}
+
 /* ------------------------------------------------------------------ active signals */
+/*
+ * Junction states (design 4.3), shape first, colour second:
+ *   transitioning = hollow green ring, pre-empted = solid green dot (blinks),
+ *   queued = amber diamond, recovering = hollow grey ring.
+ */
 .sig {
   position: relative;
   width: 24px;
   height: 24px;
   --sc: var(--map-preempted);
 }
-.sig.is-conflict {
+.sig.is-queued {
   --sc: var(--map-conflict);
+}
+.sig.is-recovering {
+  --sc: var(--map-normal);
 }
 .sig-dot {
   position: absolute;
@@ -187,7 +271,7 @@
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
 }
 /* Pre-empted: a plain on/off blink (carries "signal held green now"). */
-.sig:not(.is-conflict) .sig-dot {
+.sig.is-preempted .sig-dot {
   animation: sig-blink 1.2s steps(1, end) infinite;
 }
 @keyframes sig-blink {
@@ -195,11 +279,47 @@
     opacity: 0.35;
   }
 }
-/* Conflict: a diamond, so the state does not rely on colour alone. */
-.sig.is-conflict .sig-dot {
+/* Transitioning / recovering: hollow rings (not yet / no longer held). */
+.sig.is-transitioning .sig-dot,
+.sig.is-recovering .sig-dot {
+  inset: 5px;
+  background: #fff;
+  border: 3.5px solid var(--sc);
+}
+/* Queued: a diamond, so the state does not rely on colour alone. */
+.sig.is-queued .sig-dot {
   border-radius: 2px;
   transform: rotate(45deg);
   inset: 7px;
+}
+/* The same shapes, small, for the legend and the popup. */
+.sig-key {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  vertical-align: -1px;
+  margin-right: 4px;
+}
+.sig-key.is-preempted {
+  background: var(--map-preempted);
+}
+.sig-key.is-transitioning {
+  background: #fff;
+  border: 2.5px solid var(--map-preempted);
+}
+.sig-key.is-recovering {
+  background: #fff;
+  border: 2.5px solid var(--map-normal);
+}
+.sig-key.is-queued {
+  width: 8px;
+  height: 8px;
+  margin-left: 1px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--map-conflict);
 }
 .sig-approach {
   position: absolute;
@@ -234,8 +354,102 @@
     sans-serif;
   font-variant-numeric: tabular-nums;
 }
-.sig.is-conflict .sig-label {
+.sig.is-queued .sig-label {
   color: #1f2328;
+}
+.sig.is-transitioning .sig-label,
+.sig.is-recovering .sig-label {
+  background: #fff;
+  color: var(--sc);
+  border: 1px solid var(--sc);
+  line-height: 1.45;
+}
+.sig.is-recovering .sig-label {
+  color: #3d4451;
+}
+
+/* Signal popup (click): state, countdowns and the claimant queue. */
+.leaflet-popup.divert-popup .leaflet-popup-content-wrapper {
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 4px;
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-fg));
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+}
+.leaflet-popup.divert-popup .leaflet-popup-tip {
+  background: rgb(var(--c-surface));
+  box-shadow: none;
+  border: 1px solid rgb(var(--c-line));
+}
+.leaflet-popup.divert-popup .leaflet-popup-content {
+  margin: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  /* on a small map the popup scrolls (Leaflet maxHeight) instead of being clipped */
+  overflow-x: auto;
+}
+/* The map's own controls step aside while a popup is open, so they never cover it. */
+.map-popup-open > .map-controls {
+  visibility: hidden;
+}
+.leaflet-popup.divert-popup a.leaflet-popup-close-button {
+  color: rgb(var(--c-muted));
+}
+.sig-pop .mono {
+  font-family: theme('fontFamily.mono');
+}
+.sig-pop-title {
+  font-weight: 600;
+  padding-right: 14px;
+}
+.sig-pop-state {
+  margin-top: 2px;
+}
+.sig-pop dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 10px;
+  margin: 6px 0;
+}
+.sig-pop dl > div {
+  display: contents;
+}
+.sig-pop dt {
+  color: rgb(var(--c-muted));
+}
+.sig-pop dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.sig-pop-sub {
+  font-weight: 600;
+  margin-top: 4px;
+}
+.sig-pop table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.sig-pop th {
+  color: rgb(var(--c-muted));
+  font-weight: 500;
+  text-align: left;
+  padding: 1px 6px 1px 0;
+  border-bottom: 1px solid rgb(var(--c-line));
+}
+.sig-pop td {
+  padding: 2px 6px 2px 0;
+  vertical-align: top;
+  white-space: nowrap;
+  border-bottom: 1px solid rgb(var(--c-line));
+}
+.sig-pop td.wrap {
+  white-space: normal;
+}
+.sig-pop-meta,
+.sig-pop-empty {
+  color: rgb(var(--c-muted));
 }
 
 /* ------------------------------------------------------------------ incidents + pending */
