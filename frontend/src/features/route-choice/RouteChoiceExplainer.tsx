@@ -2,7 +2,7 @@ import clsx from 'clsx'
 import type { RouteChoice } from '../../api/types'
 import { formatDistance, formatDuration } from '../../lib/format'
 import type { RoutePreview } from '../../store/ui'
-import { candidateNotes, previewRoutes } from './routeChoice'
+import { candidateNotes, geometryNote, previewRoutes } from './routeChoice'
 
 /**
  * "Why this route": the reason, then every candidate with its distance, travel time and cost.
@@ -17,9 +17,7 @@ export function RouteChoiceExplainer({
   onPreview?: (routes: RoutePreview[] | null) => void
   defaultOpen?: boolean
 }) {
-  const hasGeometry = choice.candidates.some(
-    (c) => c.label !== choice.chosen && c.route && c.route.length > 1,
-  )
+  const note = geometryNote(choice)
   const alternatives = choice.candidates.length - 1
   const preview = (emphasis: string | null) => onPreview?.(previewRoutes(choice, emphasis))
   const clear = () => onPreview?.(null)
@@ -83,13 +81,7 @@ export function RouteChoiceExplainer({
             )
           })}
         </ul>
-        {alternatives > 0 && !hasGeometry ? (
-          <p className="text-muted">
-            The alternatives were recorded without their geometry, so they cannot be drawn.
-          </p>
-        ) : alternatives > 0 ? (
-          <p className="text-muted">Hover a route to see it on the map (faint line).</p>
-        ) : null}
+        {note ? <p className="text-muted">{note}</p> : null}
       </div>
     </details>
   )

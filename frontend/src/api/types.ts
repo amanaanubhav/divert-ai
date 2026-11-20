@@ -235,8 +235,11 @@ export interface RouteCandidate {
   contention_junctions: string[]
   incident_zones: { incident_id: string; type: IncidentType }[]
   congested_road: string | null
-  /** Geometry of the candidate when the backend recorded it (drawn faint on hover). */
-  route?: LatLng[]
+  /**
+   * Simplified geometry of the candidate, `[[lat, lng], ...]` (Douglas-Peucker, <= 150 points;
+   * docs/api.md), drawn faint on hover. Absent in route choices recorded before it existed.
+   */
+  route?: LatLng[] | null
 }
 export interface RouteChoice {
   station_id?: string
