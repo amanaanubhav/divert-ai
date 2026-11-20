@@ -70,6 +70,8 @@ def create_app(
                 cache=rds,
                 cache_ttl_s=cfg.osrm_cache_ttl_s,
                 cache_guard=guard,
+                alternatives=cfg.route_alternatives,
+                detours=cfg.route_detours,
             )
         model = eta_model or KinematicEtaModel()
         reference = ReferenceCache(sessionmaker, ttl_s=cfg.reference_cache_ttl_s)

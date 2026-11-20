@@ -85,6 +85,13 @@ def active_signals(city_id: str) -> str:
     return f"{PREFIX}:{_city(city_id)}:signals:active"
 
 
+def junctions(city_id: str) -> str:
+    """HASH signal_id -> junction geometry JSON {legs, approach_bearings, source}: the
+    approaches -> phases mapping fixed on a junction's first use (design §4.1), so a new
+    leader keeps it (written by the leader in its tick transaction, never expires)."""
+    return f"{PREFIX}:{_city(city_id)}:junctions"
+
+
 def city_tick(city_id: str) -> str:
     """HASH {tick, sim_ts, wall_ts} of the last tick written for the city."""
     return f"{PREFIX}:{_city(city_id)}:tick"
@@ -115,9 +122,11 @@ def events_channel(city_id: str) -> str:
 # -------------------------------------------------------------------------- caches
 
 
-def osrm_route_cache(profile: str, coords: str) -> str:
-    """STRING cached OSRM response; ``coords`` is the OSRM coordinate string."""
-    digest = hashlib.sha256(coords.encode()).hexdigest()[:32]
+def osrm_route_cache(profile: str, coords: str, *, scope: str = "") -> str:
+    """STRING cached OSRM response; ``coords`` is the OSRM coordinate string and ``scope``
+    everything else that changes the answer (OSRM base URL + request parameters), so a
+    different server or parameter set never reads another's cached routes."""
+    digest = hashlib.sha256(f"{scope}\n{coords}".encode()).hexdigest()[:32]
     return f"{PREFIX}:osrm:{_check(profile, 'profile')}:{digest}"
 
 
