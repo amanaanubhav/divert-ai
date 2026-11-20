@@ -59,6 +59,52 @@ PREEMPTIONS = Counter(
 PREEMPTION_CONFLICTS = Counter(
     "preemption_conflicts_total", "Claims that became CONFLICT", ["city"], namespace=NS
 )
+PREEMPTION_OUTCOMES = Counter(
+    "preemption_releases_total",
+    "Claims released, by outcome (CLEARED|TIMEOUT|CANCELLED|REROUTED)",
+    ["city", "outcome"],
+    namespace=NS,
+)
+PREEMPTION_PHASE_STATE = Counter(
+    "preemption_greens_total",
+    "Claims that got their green, by green_extend vs red_truncate",
+    ["city", "kind"],
+    namespace=NS,
+)
+SIGNALS_STARVED = Gauge(
+    "signals_starved",
+    "Junctions pre-empted for more than 50% of the last 5 minutes (operator signal)",
+    ["city"],
+    namespace=NS,
+)
+ROUTE_CANDIDATES = Histogram(
+    "route_candidates",
+    "Route candidates scored per dispatch (all stations)",
+    namespace=NS,
+    buckets=(1, 2, 3, 4, 6, 9, 12, 15),
+)
+LEGS_PLANNED = Counter(
+    "legs_planned_total", "Trip legs planned by the LegPlanner", ["city", "kind"], namespace=NS
+)
+LEG_PLAN_FAILURES = Counter(
+    "leg_plan_failures_total",
+    "LegPlanner attempts that failed (retried with backoff)",
+    ["city", "kind", "reason"],
+    namespace=NS,
+)
+LEG_PLAN_DURATION = Histogram(
+    "leg_plan_duration_seconds",
+    "LegPlanner: request to leg_planned sent (successful attempt)",
+    ["kind"],
+    namespace=NS,
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32),
+)
+REROUTES = Counter(
+    "reroutes_total",
+    "Re-route evaluations by outcome (replaced|kept|failed)",
+    ["city", "outcome"],
+    namespace=NS,
+)
 WORKER_IS_LEADER = Gauge("worker_is_leader", "1 if this worker holds the leader lock", namespace=NS)
 WORKER_HEARTBEAT_AGE = Gauge(
     "worker_heartbeat_age_seconds", "Age of the leader heartbeat (api view)", namespace=NS
