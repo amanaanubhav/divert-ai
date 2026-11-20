@@ -63,7 +63,7 @@ Tests strip every `DIVERT_*` variable except `DIVERT_TEST_*` (`backend/tests/con
 | `DIVERT_OSRM_URL` | str | `https://router.project-osrm.org` | | api | OSRM base URL. The default is the **public demo: fair use only, no SLA**. |
 | `DIVERT_OSRM_TIMEOUT_S` | float | `8.0` | > 0 | api | httpx timeout. The connect timeout is `min(timeout, 3.0)` (`services/routing.OsrmRouter`). |
 | `DIVERT_OSRM_RETRIES` | int | `2` | >= 0 | api | Retries on `RETRYABLE_STATUS` (429, 500, 502, 503, 504) and transport errors. |
-| `DIVERT_OSRM_CACHE_TTL_S` | int | `3600` | >= 0 | api | TTL of the cached routes `divert:osrm:driving:{digest}`. `0` disables the cache. |
+| `DIVERT_OSRM_CACHE_TTL_S` | int | `3600` | >= 0 | api | TTL of the cached routes `divert:osrm:driving:{digest}`. `0` disables the cache. The digest covers the OSRM base URL and the request parameters, so switching servers never serves another server's routes. |
 
 ### 2.3 Reference data, dispatch and pre-emption
 
@@ -71,14 +71,19 @@ Tests strip every `DIVERT_*` variable except `DIVERT_TEST_*` (`backend/tests/con
 |---|---|---|---|---|---|
 | `DIVERT_CITIES` | CSV list | `delhi,kolkata,bengaluru` | lower-cased | api, worker, cli | Cities served, simulated and seeded. Keep it identical across api, worker and migrate. |
 | `DIVERT_UNITS_PER_STATION` | int | `2` | 1..20 | cli (seed) | Units created per active station. Re-seeding only adds missing units. |
-| `DIVERT_CANDIDATE_STATIONS` | int | `3` | 1..10 | api | Nearest stations with a free unit (PostGIS KNN). Each one is routed with OSRM and ranked by ETA. |
-| `DIVERT_CORRIDOR_M` | float | `30.0` | > 0, <= 200 | api | Signals within this distance of the route form the corridor (`ST_DWithin`). Fixed per dispatch. |
-| `DIVERT_PREEMPT_LEAD_S` | float | `45.0` | > 0 | worker | Claim a signal when the ETA to it is at most this... |
-| `DIVERT_PREEMPT_DISTANCE_M` | float | `600.0` | > 0 | worker | ...or when it is within this distance ahead along the route. |
-| `DIVERT_PREEMPT_RELEASE_PAST_M` | float | `20.0` | >= 0 | worker | Release a claim once the vehicle is this far past the signal. |
-| `DIVERT_CONFLICT_TIE_S` | float | `5.0` | >= 0 | worker | ETAs within this window of the best are a tie, broken by service priority, then by vehicle id. |
+| `DIVERT_CANDIDATE_STATIONS` | int | `3` | 1..10 | api | Nearest stations with a free unit (PostGIS KNN). Each one's route alternatives are scored; stations are ranked by their best cost. |
+| `DIVERT_ROUTE_ALTERNATIVES` | int | `3` | 1..5 | api | OSRM `alternatives` per request (1 = OSRM's route only). |
+| `DIVERT_ROUTE_DETOURS` | int | `2` | 0..4 | api | Via-point detours added when OSRM returns fewer than 2 routes for a trip longer than 1.5 km. |
+| `DIVERT_CORRIDOR_M` | float | `30.0` | > 0, <= 200 | api | Signals within this distance of the route form the corridor (`ST_DWithin`); also the buffer that separates passes through the same junction. Fixed per dispatch. |
+| `DIVERT_PREEMPT_MAX_LEAD_S` | float | `90.0` | > 0 | worker | Never claim a junction with an ETA above this. The claim itself happens at the dynamic lead (transition + queue + 5 s). Deprecated alias: `DIVERT_PREEMPT_LEAD_S`. |
+| `DIVERT_PREEMPT_MIN_CLAIM_DISTANCE_M` | float | `150.0` | > 0 | worker | Always claim within `max(stopping distance + 50 m, this)` of the junction. Deprecated alias: `DIVERT_PREEMPT_DISTANCE_M`. |
+| `DIVERT_PREEMPT_RELEASE_PAST_M` | float | `20.0` | >= 0 | worker | Junction box (3-4 legs or unknown): release a claim once the vehicle is this far past the centre; the stop line is half of it before the centre. |
+| `DIVERT_PREEMPT_RELEASE_PAST_LARGE_M` | float | `30.0` | >= 0 | worker | Junction box for 5+ legs. |
+| `DIVERT_PREEMPT_MAX_HOLD_S` | float | `60.0` | > 0 | worker | A served claim whose vehicle has not reached the junction this long after its green is released (`TIMEOUT`); it may re-claim after the recovery. |
+| `DIVERT_PREEMPT_RECOVERY_S` | float | `20.0` | >= 0 | worker | After a release, the most-starved approach's green (between amber + all-red clearances) before the fixed plan resumes. Assumption: the design leaves the value open. |
+| `DIVERT_PRIORITY_WINDOW_S` | float | `10.0` | >= 0 | worker | A better priority rank whose ETA is within this of the earliest claimant wins the junction. Deprecated alias: `DIVERT_CONFLICT_TIE_S`. |
 
-The worker reads the four pre-emption settings once, when it becomes leader (`worker.Worker.take_over` -> `PreemptionRules`).
+The worker reads the pre-emption settings once, when it becomes leader (`worker.Worker.take_over` -> `PreemptionRules.from_settings`). The deprecated aliases are read only when the new name is not set; `.env.example` and the k8s ConfigMap use the new names. Every other number of the signal, lane and route-choice models is a named constant in code with its assumption documented (`domain/signal_plan.py`, `domain/lanes.py`, `domain/movement.py`, `services/preemption.py`, `services/traffic.py`, `services/route_choice.py`).
 
 ### 2.4 Simulation
 
@@ -86,7 +91,18 @@ The worker reads the four pre-emption settings once, when it becomes leader (`wo
 |---|---|---|---|---|---|
 | `DIVERT_SIM_TICK_S` | float | `0.5` | > 0, <= 5 | worker | Wall-clock tick period. |
 | `DIVERT_SIM_TIME_SCALE` | float | `1.0` | > 0, <= 100 | worker, api | Simulated seconds per wall second. When it is not 1, the worker writes `divert:sim:clock` and the API reads it for the dispatch ETA's congestion hour (`DispatchService.sim_clock`). **Set the same value on api and worker.** |
-| `DIVERT_SCENE_TIME_S` | float | `120.0` | >= 0 | worker | Simulated seconds on scene before the incident is cleared (RESOLVED). |
+| `DIVERT_SCENE_TIME_AMBULANCE_S` | float | `480.0` | >= 0 | worker | On-scene care and loading (simulated s; assumption). Then TRANSPORT (MEDICAL) or RETURN. |
+| `DIVERT_SCENE_TIME_FIRE_ENGINE_S` | float | `1200.0` | >= 0 | worker | Firefighting / scene work; then `cleared` (incident RESOLVED) and RETURN. |
+| `DIVERT_SCENE_TIME_POLICE_S` | float | `600.0` | >= 0 | worker | Police scene work; then `cleared` and RETURN. |
+| `DIVERT_HOSPITAL_HANDOVER_S` | float | `600.0` | >= 0 | worker | Patient handover at the ED; then `handover_complete` (MEDICAL RESOLVED) and RETURN. |
+| `DIVERT_SCENE_TIME_S` | float | unset | >= 0 | worker | **Deprecated** fallback: if set, the scene time of every service whose own setting is not set (`Settings.scene_time_for`). |
+| `DIVERT_LEG_PLAN_BACKOFF_S` | float | `2.0` | > 0 | worker (LegPlanner) | First retry delay after an OSRM / PostgreSQL failure while planning a leg (or a failed XADD of its command); doubles per failure, unlimited retries. |
+| `DIVERT_LEG_PLAN_BACKOFF_MAX_S` | float | `60.0` | > 0 | worker (LegPlanner) | Cap of that backoff. |
+| `DIVERT_HOSPITAL_CANDIDATES` | int | `6` | 1..20 | worker (LegPlanner) | Nearest eligible hospitals (PostGIS KNN) routed and scored for a TRANSPORT leg. |
+| `DIVERT_REROUTE_MIN_SAVING_S` | float | `60.0` | >= 0 | worker (LegPlanner) | Hysteresis: a re-route is applied only if it saves at least this much. |
+| `DIVERT_REROUTE_MAX_PER_LEG` | int | `2` | 0..10 | worker | At most this many re-routes per leg (0 disables re-routing). |
+| `DIVERT_REROUTE_BEHIND_SHARE` | float | `0.25` | >= 0 | worker | Trigger (b): more than this share of the leg's predicted time late ... |
+| `DIVERT_REROUTE_BEHIND_S` | float | `60.0` | >= 0 | worker | ... and more than this many seconds late. Trigger (a), a new FIRE / CRIME zone on the remaining path, has no setting. |
 | `DIVERT_POSITION_SAMPLE_S` | float | `5.0` | > 0 | worker | Simulated seconds between `vehicle_position` history samples. |
 | `DIVERT_POSITION_RETENTION_DAYS` | int | `30` | >= 1 | persister | `vehicle_positions` older than this are pruned. |
 
@@ -234,8 +250,12 @@ Every backend pod and the migrate Job load it with `envFrom`.
 | `DIVERT_OSRM_URL` | `http://osrm.divert.svc.cluster.local:5000` | yes. **The base contains no OSRM Deployment or Service.** Deploy it separately. |
 | `DIVERT_OSRM_TIMEOUT_S` / `DIVERT_OSRM_CACHE_TTL_S` | `"5"` / `"3600"` | timeout yes (default 8) |
 | `DIVERT_CORS_ORIGINS` | `https://divert.example.org` | yes (placeholder) |
-| `DIVERT_CORRIDOR_M`, `DIVERT_PREEMPT_LEAD_S`, `DIVERT_PREEMPT_DISTANCE_M` | `"30"`, `"45"`, `"600"` | no |
-| `DIVERT_SIM_TICK_S`, `DIVERT_SIM_TIME_SCALE`, `DIVERT_SCENE_TIME_S` | `"0.5"`, `"1"`, `"120"` | no |
+| `DIVERT_CORRIDOR_M`, `DIVERT_PREEMPT_MAX_LEAD_S`, `DIVERT_PREEMPT_MIN_CLAIM_DISTANCE_M` | `"30"`, `"90"`, `"150"` | no |
+| `DIVERT_PREEMPT_MAX_HOLD_S`, `DIVERT_PREEMPT_RECOVERY_S`, `DIVERT_PRIORITY_WINDOW_S` | `"60"`, `"20"`, `"10"` | no |
+| `DIVERT_ROUTE_ALTERNATIVES`, `DIVERT_ROUTE_DETOURS` | `"3"`, `"2"` | no |
+| `DIVERT_SIM_TICK_S`, `DIVERT_SIM_TIME_SCALE` | `"0.5"`, `"1"` | no |
+| `DIVERT_SCENE_TIME_AMBULANCE_S`, `_FIRE_ENGINE_S`, `_POLICE_S`, `DIVERT_HOSPITAL_HANDOVER_S` | `"480"`, `"1200"`, `"600"`, `"600"` | no |
+| `DIVERT_LEG_PLAN_BACKOFF_S`, `_MAX_S`, `DIVERT_HOSPITAL_CANDIDATES`, `DIVERT_REROUTE_MIN_SAVING_S`, `_MAX_PER_LEG`, `_BEHIND_SHARE`, `_BEHIND_S` | `"2"`, `"60"`, `"6"`, `"60"`, `"2"`, `"0.25"`, `"60"` | no |
 | `DIVERT_POSITION_RETENTION_DAYS`, `DIVERT_DB_POOL_SIZE` | `"30"`, `"10"` | no |
 | `DIVERT_LEADER_LOCK_TTL_MS`, `DIVERT_HEARTBEAT_MAX_AGE_S` | `"5000"`, `"10"` | no |
 | `DIVERT_PERSISTER_BATCH`, `DIVERT_PERSISTER_MAX_RETRIES`, `DIVERT_OUTBOX_RELAY_INTERVAL_S` | `"200"`, `"5"`, `"2"` | no |
@@ -283,7 +303,7 @@ Copy it to `.env` in the repo root (`cp .env.example .env`). Never commit `.env`
    - `DIVERT_REDIS_REQUEST_TIMEOUT_S=0.5`, `DIVERT_REDIS_CIRCUIT_COOLDOWN_S=5`
    - `DIVERT_CITIES`, `DIVERT_UNITS_PER_STATION=2`
    - OSRM 8 s / 2 retries / 3600 s
-   - corridor and pre-emption 30 / 45 / 600 / 20 / 5
+   - route choice 3 alternatives / 2 detours; corridor and pre-emption 30 m, max lead 90 s, min claim distance 150 m, box 20 / 30 m, max hold 60 s, recovery 20 s, priority window 10 s
    - simulation 0.5 / 1 / 120 / 5 / 30
    - worker and persister 5000 / 10 / 200 / 5 / 2 / 7 / 9100
    - API key empty, CORS `http://localhost:8080,http://localhost:5173`, rate 60, `DIVERT_TRUST_PROXY_HEADERS=false`
@@ -336,7 +356,7 @@ Defaults are tuned for a laptop running docker compose. Change these for other e
 | `DIVERT_OSRM_TIMEOUT_S` | 8 | 8 | 5 (ConfigMap, in-cluster OSRM) |
 | `DIVERT_WEB_TILE_URL*` / `VITE_TILE_*` | empty = OSM standard tiles (development and demos only) | OSM standard tiles are acceptable for light demos | **A keyed provider or self-hosted tiles**, plus a matching attribution |
 | `DIVERT_SIM_TIME_SCALE` | 1 | e.g. 10 to shorten runs (max 100). Set it on api **and** worker. | 1 |
-| `DIVERT_SCENE_TIME_S` | 120 | Lower (the unit tests use 30) for faster resolution | 120 |
+| `DIVERT_SCENE_TIME_<SERVICE>_S`, `DIVERT_HOSPITAL_HANDOVER_S` | 480 / 1200 / 600, 600 | Lower (the tests use 20-30) or raise `DIVERT_SIM_TIME_SCALE` for faster trips | defaults |
 | `DIVERT_POSITION_RETENTION_DAYS` / `DIVERT_OUTBOX_RETENTION_DAYS` | 30 / 7 | Short (e.g. 1-7 / 1) | Per data-retention policy |
 | `DIVERT_DATABASE_URL` / `DIVERT_REDIS_URL` | compose containers | Dedicated instances | Managed, TLS (`?ssl=require`, `rediss://`), from the Secret |
 | `DIVERT_DB_POOL_SIZE` / `DIVERT_DB_MAX_OVERFLOW` | 10 / 10 | 10 / 10 | Size so that replicas x (pool + overflow) fits `max_connections`, or use PgBouncer |

@@ -51,6 +51,7 @@ backend/
 │   │   ├── enums.py          IncidentType, ServiceType, UnitStatus, IncidentStatus, SignalState, Lane + lookup tables
 │   │   ├── geo.py            haversine geodesy: LatLng, BBox, distances, bearings, interpolation, projection
 │   │   ├── models.py         frozen value objects: City, TrafficProfile, Station, Signal, Unit, candidates
+│   │   ├── hospitals.py      TRANSPORT hospital eligibility + choose_hospital (ED preference within tolerance)
 │   │   └── route.py          Route (OSRM route reduced to points/speeds/maneuvers), CorridorSignal, lane_advisory()
 │   ├── services/
 │   │   ├── dispatch.py       DispatchService: validate -> KNN -> OSRM -> corridor -> ONE transaction -> post-commit
@@ -61,7 +62,10 @@ backend/
 │   │   ├── simulation.py     SimulationEngine + Vehicle + CityBatch: one tick for every city (pure, no I/O)
 │   │   ├── outbox.py         OutboxRelay: post-commit XADD fast path + background relay with SKIP LOCKED
 │   │   ├── reference.py      ReferenceCache: per-process TTL cache of cities/stations/signals
-│   │   └── history.py        HistoryService: history list/detail/track and analytics read side
+│   │   ├── history.py        HistoryService: history list/detail/track and analytics read side
+│   │   ├── legs.py           trip legs (pure): PendingLeg, LegPlan, leg_planned / route_replaced commands, splice, re-route arithmetic, is_home
+│   │   ├── obey.py           non-emergency (RETURN) motion shared by the engine and the ETA replay: decide_stop, replay
+│   │   └── planner.py        LegPlanner (asyncio tasks of the leader): hospital + route + corridor, PG leg + outbox, XADD, retries, re-routes
 │   ├── store/                Redis
 │   │   ├── redis_store.py    EVERY Redis key builder + stream/group names + create_redis()
 │   │   ├── events.py         message vocabularies (CommandType, HistoryEventType, StreamMessageType), event_id(), message()
@@ -79,6 +83,7 @@ backend/
 │   │       ├── reference.py  ReferenceRepository: KNN stations, corridor (ST_DWithin), SKIP LOCKED unit lock
 │   │       ├── incidents.py  IncidentRepository: dispatch/cancel writes + history read models, keyset cursor
 │   │       ├── history.py    HistoryWriter (persister, idempotent), worker rebuild reads, retention prunes
+│   │       ├── legs.py       LegRepository: dispatch_legs insert (+ outbox command), get, legs_of
 │   │       └── analytics.py  summary(): per-city aggregates computed in SQL
 │   ├── cities/
 │   │   ├── loader.py         load + validate committed snapshots (CitySnapshot, SnapshotError)
@@ -88,7 +93,7 @@ backend/
 │       ├── env.py            async Alembic environment (asyncpg); URL from Settings unless the caller set one
 │       ├── filters.py        include_object(): ignore PostGIS-owned reflected tables (shared with the drift test)
 │       ├── script.py.mako    template for new revisions
-│       └── versions/         0001_initial, 0002_dispatch_rebuild, 0003_position_elapsed
+│       └── versions/         0001_initial, 0002_dispatch_rebuild, 0003_position_elapsed, 0004_trip_legs
 └── tests/
     ├── conftest.py           autouse fixture: strip DIVERT_* env (keeps DIVERT_TEST_*), clear the settings cache
     ├── support.py            shared helpers: city(), straight_route(), route_through(), corridor_at(), start_cmd(), engine(), Clock
@@ -236,17 +241,24 @@ flowchart TD
 | `domain/enums.py` | Shared enumerations and lookup tables | `IncidentType`, `ServiceType`, `UnitStatus`, `IncidentStatus`, `SignalState`, `Lane`, `SERVICE_FOR_INCIDENT`, `INCIDENT_TYPE_ALIASES`, `SERVICE_PRIORITY`, `CALLSIGN_PREFIX`, `normalize_incident_type` | everyone |
 | `domain/geo.py` | Spherical geodesy (`EARTH_RADIUS_M = 6_371_008.8`) | `LatLng`, `BBox`, `haversine_m`, `initial_bearing_deg`, `destination_point`, `cumulative_distances`, `interpolate_by_distance`, `bearing_at_distance`, `project_onto_polyline` | routing, dispatch, simulation, osm |
 | `domain/models.py` | Immutable reference objects that repositories return | `TrafficProfile` (24 factors in (0, 1.5]), `City`, `Station`, `StationAvailability`, `Signal`, `Unit`, `StationCandidate`, `CorridorCandidate` | repositories, services |
-| `domain/route.py` | Route and corridor values | `Route` (`build`, `to_json`, `from_json`), `Maneuver`, `CorridorSignal`, `lane_advisory`, `LANE_MATCH_WINDOW_M = 40.0` | routing, dispatch, simulation |
+| `domain/route.py` | Route and corridor values | `Route` (`build`, `to_json`, `from_json`, `intersections`, `source`), `Maneuver` (+ `exit`, `name`), `Intersection`, `CorridorSignal` (+ `pass_no`, `movement`, `free_left`, `legs`, `junction_bearings`, `advice`, `key`), `corridor_key` | routing, corridor, dispatch, simulation |
+| `domain/movement.py` | Turn classification (design §3) | `classify_turn`, `class_distance`, `junction_movement` -> `JunctionMovement`, `approach_speed_mps`, `turning_left_before` (free left) | corridor |
+| `domain/lanes.py` | Lane model (design §3) | `road_class`, `lanes_per_direction`, `target_lane`, `side_for`, `plan_lanes(LaneInput..., emergency=)` -> `LaneAdvice` | corridor, route |
+| `domain/signal_plan.py` | Synthetic fixed-time split-phase plans (design §4.1) | `PhasePlan` (`status`, `next_green_at`, `last_green_end`, `expected_wait_s`), `phase_at`, `PhaseStatus`, `Stage`, `JunctionGeometry` (`from_osrm`, `synthetic`, `phase_for`) | junctions, preemption, eta |
 
 ### 3.4 Services (`services/`)
 
 | File | Responsibility | Key classes / functions | Collaborators |
 |---|---|---|---|
 | `services/dispatch.py` | The dispatch and cancel use cases | `DispatchService` (`create_incident`, `cancel_incident`, `sim_clock`, `drain`), `Router` protocol, `build_corridor`, `start_command`, `Plan`, errors `DispatchError`, `InvalidIncident`, `NotFound`, `NoUnitAvailable`, `InvalidState`, `RoutingUnavailable` | `ReferenceRepository`, `IncidentRepository`, `OsrmRouter` (as `Router`), `EtaModel`, `OutboxRelay`, `ReferenceCache`, `RedisGuard` |
-| `services/routing.py` | OSRM client | `OsrmRouter` (`route`, `aclose`), `parse_osrm_route`, `RoutingError`, `RETRYABLE_STATUS`, `MANEUVER_SNAP_M = 250.0` | httpx, Redis cache key `osrm_route_cache` |
+| `services/routing.py` | OSRM client | `OsrmRouter` (`route`, `alternatives`, `aclose`), `parse_osrm_routes`, `parse_osrm_route`, `detour_vias`, `is_duplicate`, `RoutingError`, `RETRYABLE_STATUS`, `MANEUVER_SNAP_M = 250.0` | httpx, Redis cache key `osrm_route_cache(scope=base URL + params)` |
+| `services/corridor.py` | Corridor with passes, movements, lane advice | `build_corridor(route, candidates, within_m=, emergency=)`, `project_passes` | domain movement/lanes; dispatch |
+| `services/traffic.py` | Traffic model seam (design §2) | `TrafficModel` (protocol), `ModelledTraffic` (class-aware congestion x incident zones), `UNCONGESTED`, `FREE_FLOW`, `class_factor`, `city_factor`, `crowd_index`, `contention_junctions`, `ZONE_RULES` | eta, route_choice, simulation, dispatch |
+| `services/route_choice.py` | Crowd-aware scoring (design §2) | `score_route`, `make_candidate`, `Candidate`, `choose` -> `Choice` (`to_json` = `route_choice`), `within_length`, `turn_delay_s`, `junction_delay_s` | eta, traffic; dispatch |
+| `services/junctions.py` | Junction control (design §4.1/4.3/4.5) | `JunctionControl` (`status`, `serve`, `release`, `adopt`, `state`, `next_green_at`, `is_starved`), `JunctionRegistry` (`get`, `phase_of`, `drop_idle`) | simulation |
 | `services/speed_model.py` | Kinematics shared by ETA and motion | `PROFILES`, `VehicleProfile`, `SpeedProfile` (`allowed_speed`, `step`, `time_from`), `build_profile`, `segment_cap_mps`, `junction_cap_mps`, constants | `eta`, `simulation` |
-| `services/eta.py` | ETA seam | `EtaModel` (protocol), `EtaQuery`, `EtaEstimate`, `KinematicEtaModel` (`name = "kinematic-v1"`), `congestion_at`, `plan_profile` | `speed_model`; used by dispatch and simulation |
-| `services/preemption.py` | Claim/release/conflict rules | `PreemptionRules` (`should_claim`, `is_past`), `Claimant`, `Resolution`, `resolve` | `simulation` |
+| `services/eta.py` | ETA seam | `EtaModel` (protocol), `EtaQuery`, `EtaEstimate`, `KinematicEtaModel` (`name = "kinematic-v3"` since stage 5B - non-emergency RETURN legs are replayed tick by tick against the fixed signal plans; `kinematic-v2` in stage 5A; `kinematic-v1` before), `congestion_at`, `plan_profile` | `speed_model`; used by dispatch and simulation |
+| `services/preemption.py` | Claim/release/conflict rules (design §4.2/4.4/4.5) | `PreemptionRules` (`from_settings`, `should_claim`, `box_m`, `stop_line_m`, `is_past`, `must_cross`), `transition_s`, `queue_clear_s`, `required_lead` -> `Lead`, `Claimant`, `resolve_junction` -> `Resolution`, `queued_green_times`, `speed_advisory` -> `Advisory` | `simulation` |
 | `services/simulation.py` | The engine the worker drives | `SimulationEngine` (`start_dispatch`, `cancel_dispatch`, `restore`, `tick`, `drain`, `ack`), `Vehicle`, `Claim`, `CityBatch`, `SimConfig`, `VehicleStatus`, `CommandError` | `eta`, `preemption`, `speed_model`, `store/events` |
 | `services/outbox.py` | Transactional outbox delivery | `OutboxRelay` (`send_now`, `relay_once`, `backlog`, `run`), `publish`, `TOPIC_STREAMS` | `db.models.Outbox`, `store/streams.xadd_json`, `RedisGuard` |
 | `services/reference.py` | Per-process reference cache | `ReferenceCache` (`cities`, `reference`, `city`, `invalidate`) | `ReferenceRepository` |

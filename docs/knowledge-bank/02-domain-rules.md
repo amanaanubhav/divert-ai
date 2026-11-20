@@ -1,18 +1,18 @@
 # 02 · Domain rules
 
-**What this covers:** the business and simulation rules of DIVERT exactly as the code applies them: incident types and aliases, which service answers which incident, how a unit is chosen, vehicle profiles, the speed model, the ETA model, signal pre-emption and conflicts, the lane advisory for India's left-hand traffic, the lifecycle state machines, scene time, cancellation, the "estimated time saved" figure and the simulation clock. It ends with a worked numeric example that was produced by running the real engine code. Every number names the file and symbol it comes from. For the derivation of the motion maths see [simulation-model.md](../simulation-model.md); for where each rule runs at runtime see [Runtime workflows](07-runtime-workflows.md).
+**What this covers:** the business and simulation rules of DIVERT exactly as the code applies them: incident types and aliases, which service answers which incident, how a unit and its route are chosen (crowd-aware), vehicle profiles, the speed model, the ETA model, synthetic signal plans, dynamic pre-emption and conflicts, movements and lane advice for India's left-hand traffic, the lifecycle state machines, scene time, cancellation, the "estimated time saved" figure and the simulation clock. It ends with a worked numeric example that was produced by running the real engine code. Every number names the file and symbol it comes from. For the derivation of the motion maths see [simulation-model.md](../simulation-model.md); for where each rule runs at runtime see [Runtime workflows](07-runtime-workflows.md).
 
 All model constants are **documented defaults, not measurements**. The congestion factors and junction delays in particular are hand-set approximations (see [Known limits](01-specification.md#10-known-limits-and-future-scope)).
 
 ## Contents
 
 1. [Incident types, aliases and services](#1-incident-types-aliases-and-services)
-2. [Choosing the unit](#2-choosing-the-unit)
-3. [Corridor and lane advisory](#3-corridor-and-lane-advisory)
+2. [Choosing the unit and the route](#2-choosing-the-unit-and-the-route)
+3. [Corridor, movements and lane advice](#3-corridor-movements-and-lane-advice)
 4. [Vehicle profiles](#4-vehicle-profiles)
 5. [Speed model](#5-speed-model)
 6. [ETA model](#6-eta-model)
-7. [Signal pre-emption](#7-signal-pre-emption)
+7. [Signals and pre-emption](#7-signals-and-pre-emption)
 8. [Lifecycle state machines](#8-lifecycle-state-machines)
 9. [Scene time, cancellation, time saved, simulation clock](#9-scene-time-cancellation-time-saved-simulation-clock)
 10. [Worked example](#10-worked-example-one-ambulance-one-junction)
@@ -37,40 +37,68 @@ Rules:
 - The request body schema `IncidentCreate` (`backend/src/divert/schemas/incidents.py`) allows `type` up to 32 characters, `location` as `[lat, lng]` within ±90/±180, an optional `description` up to 1000 characters, and rejects unknown fields (`extra="forbid"`).
 - History filters accept the same aliases (`parse_types` in `backend/src/divert/api/v1/history.py`).
 
-## 2. Choosing the unit
+## 2. Choosing the unit and the route
 
-`DispatchService._plans` and `DispatchService._dispatch` in `backend/src/divert/services/dispatch.py`:
+`DispatchService._plans` and `DispatchService._dispatch` in `backend/src/divert/services/dispatch.py`; scoring in `backend/src/divert/services/route_choice.py` (design §2, [trip-legs-and-dynamic-preemption.md](../design/trip-legs-and-dynamic-preemption.md)):
 
 1. **Candidates.** The `DIVERT_CANDIDATE_STATIONS` (default 3, range 1–10, `Settings.candidate_stations`) nearest *active* stations of the right service that have at least one `AVAILABLE` unit. Nearest is a PostGIS KNN (`<->`) on the geography GiST index (`ReferenceRepository.nearest_stations_with_free_units`). No candidate gives `409 no_unit_available`.
-2. **Route each candidate** with OSRM, concurrently. A candidate whose route fails with `RoutingError` is skipped. If none can be routed the API returns `503 routing_unavailable` and writes nothing. There is no straight-line fallback.
-3. **Rank by predicted ETA** from the ETA model ([section 6](#6-eta-model)), evaluated at the simulation clock. Ties fall back to straight-line distance, then station id: sort key `(eta_s, distance_m, station.id)`.
-4. **Lock a unit in rank order.** Inside one transaction, `ReferenceRepository.lock_free_unit` takes the lowest-`ordinal` `AVAILABLE` unit of the best station with `FOR UPDATE SKIP LOCKED`. If another transaction took them all, it tries the next-ranked station. If every candidate is exhausted, `409 no_unit_available` ("all nearby … units were just taken").
+2. **Crowding inputs.** The city's active incidents (`IncidentRepository.active_incident_zones`: status `OPEN`/`DISPATCHED`/`EN_ROUTE`/`ON_SCENE`) become incident zones; the live emergency vehicles' junction ETAs (`signal_etas` in each live vehicle document, one Redis `HGETALL`, skipped if Redis is down) feed corridor contention.
+3. **Route alternatives per station**, concurrently (`OsrmRouter.alternatives`): OSRM `alternatives=DIVERT_ROUTE_ALTERNATIVES` (3); if fewer than 2 routes come back and the trip is longer than 1.5 km, up to `DIVERT_ROUTE_DETOURS` (2) via-point detours (via = the midpoint offset perpendicular by ±20 % of the straight distance, `continue_straight=true`; a detour that duplicates an earlier route is dropped). A station whose routing fails with `RoutingError` is skipped; none routable → `503 routing_unavailable`, nothing written. No straight-line fallback.
+4. **Score every candidate** (`score_route`) and drop those longer than 1.6 × the shortest (`within_length`):
+
+   `cost = ETA under the traffic model + junction delays + penalties`
+
+   | Term | Rule |
+   |---|---|
+   | ETA | `KinematicEtaModel` with the per-segment traffic factors of [section 5.1](#51-segment-cap) (class-aware congestion × incident zones), at the simulation clock |
+   | Junction delay (emergency) | STRAIGHT 0 s, SLIGHT 1 s, LEFT 3 s (0 for a free left), RIGHT 6 s, SHARP 8 s, U_TURN 12 s, ROUNDABOUT 4 + 2 × exit s (`TURN_DELAY_S`) |
+   | Junction delay (non-emergency) | the same + the junction's expected signal wait `red_share × red / 2` |
+   | Penalties | corridor contention: 10 s (`CONTENTION_DELAY_S`) per junction another live emergency vehicle is expected at within ±20 s |
+
+5. **Pick per station** (`choose`): the cheapest; candidates within 5 % of it prefer fewer signalised RIGHT/SHARP_RIGHT/U_TURN, then fewer contested junctions, then the shorter distance. Then **rank the stations** by their chosen cost (ties: straight-line distance, station id).
+6. **Record** `route_choice` (chosen label, reason, every candidate with distance, free-flow base time, congested time, junction delay, penalties, cost, crowd index = length-weighted mean of `1 − factor`, right turns, contested junctions, incident zones, most congested road). It rides in the `start_dispatch` command (outbox payload), the `dispatched` timeline event payload, the `POST` response (`vehicle.route_choice`) and the incident detail (`dispatches[].route_choice`). Reason examples: `Route B: 1.8 min faster than A (A: Ring Road congested, 2 extra right turns)`, `Route B: within 5% of A, shorter`.
+7. **Lock a unit in rank order.** Inside one transaction, `ReferenceRepository.lock_free_unit` takes the lowest-`ordinal` `AVAILABLE` unit of the best station with `FOR UPDATE SKIP LOCKED`; if every unit was just taken it tries the next station; all exhausted → `409 no_unit_available`.
 
 One incident gets exactly one dispatch. There is no API to add a second unit to an incident.
 
+**Hospital for a TRANSPORT leg** (design section 1.1, `domain/hospitals.py`, `LegPlanner._to_hospital`):
+
+1. eligible = active, named AMBULANCE stations (OSM `amenity=hospital`) except `emergency=no` and `healthcare` ∈ {dentist, blood_bank, alternative, doctor, birthing_centre} (`is_eligible`, `ReferenceRepository.nearest_hospitals`);
+2. the `DIVERT_HOSPITAL_CANDIDATES` (6) nearest to the scene (PostGIS KNN) are routed concurrently and scored with the crowd-aware cost; each keeps its best route;
+3. the best `emergency=yes` hospital wins if its cost ≤ `max(180 s, 1.25 × best cost)` (read literally: a confirmed ED within 3 minutes, or within 1.25 × the best), else the cheapest overall; ties: cost, straight-line distance, id;
+4. the choice and every hospital considered are stored as `dispatch_legs.hospital_choice` (`chosen`, `reason`, `ed_tolerance_s`, `candidates[]`).
+
+Snapshot data (regenerated offline from the cached Overpass payloads; ids and counts unchanged): Delhi 847 hospitals (`emergency` yes 36 / no 11 / untagged 800), Kolkata 294 (31 / 5 / 258), Bengaluru 1,086 (108 / 29 / 949).
+
 Fleet: OSM has no fleet data, so the seed gives every active station `DIVERT_UNITS_PER_STATION` units (default 2, range 1–20, `Settings.units_per_station`; `seed_city` in `backend/src/divert/db/seed.py`). This is a modelling assumption.
 
-## 3. Corridor and lane advisory
+## 3. Corridor, movements and lane advice
 
-**Corridor.** The signals within `DIVERT_CORRIDOR_M` (default 30 m, range >0–200, `Settings.corridor_m`) of the route line are found with `ST_DWithin` on geography (`ReferenceRepository.corridor_candidates`). For each one, `build_corridor` (`backend/src/divert/services/dispatch.py`) computes:
+**Corridor** (`build_corridor` in `backend/src/divert/services/corridor.py`). The signals within `DIVERT_CORRIDOR_M` (default 30 m) of the route line are found with `ST_DWithin` on geography (`ReferenceRepository.corridor_candidates`). Each is projected onto the polyline once per **pass** (`project_passes`: runs of segments within the buffer, runs less than 200 m apart merged), so a route through the same junction twice gets two entries, `pass_no` 0 and 1, keys `J` and `J#1`. Per entry:
 
-| Field | Rule | Source |
+| Field | Rule | Code |
 |---|---|---|
-| `along_m` | distance along the route to the signal's projection onto the polyline (cumulative haversine) | `project_onto_polyline` in `backend/src/divert/domain/geo.py` |
-| `offset_m` | distance from the signal to the route line | same |
-| `approach_bearing` | route bearing 5 m before the junction (`APPROACH_LOOKBACK_M = 5.0`) | `build_corridor` |
-| `lane` | lane advisory, below | `lane_advisory` in `backend/src/divert/domain/route.py` |
+| `along_m`, `offset_m` | projection onto the polyline (cumulative haversine) | `project_passes` |
+| `approach_bearing`, `exit_bearing`, `turn_deg` | chords over the 30 m before / after; an OSRM intersection within 15 m (and 50 m along) wins with `bearings[in] + 180` / `bearings[out]` | `junction_movement` in `backend/src/divert/domain/movement.py` |
+| `legs`, `junction_bearings` | that intersection's road count and bearings (intersections with < 2 roads are OSRM's depart/arrive points and are ignored); `null` = unknown (4 assumed) | same |
+| `movement` | below | same |
+| `free_left` | below | same |
+| `advice` | lane advice, below; `lane` = `advice.side` (`L`, `C` or `R`, kept for API compatibility) | `plan_lanes` in `backend/src/divert/domain/lanes.py` |
 
-The corridor is sorted by `(along_m, signal_id)`. Distances use a sphere of radius 6 371 008.8 m (`EARTH_RADIUS_M`, `backend/src/divert/domain/geo.py`).
+**Movement.** `δ = normalise(exit − approach)` in (−180°, 180°], negative = left: `|δ| ≤ 20` STRAIGHT, `≤ 45` SLIGHT_LEFT/RIGHT, `≤ 135` LEFT/RIGHT, `< 170` SHARP_LEFT/RIGHT, `≥ 170` U_TURN (`classify_turn`). The OSRM step maneuver within 40 m corroborates: within one class OSRM's modifier is used, more than one class apart the geometry wins (debug log). A `roundabout`/`rotary` maneuver (or the `exit …` step after one) makes it ROUNDABOUT with OSRM's exit number. A route that ends at the junction is STRAIGHT.
 
-**Lane advisory (India drives on the left).** `lane_advisory(along_m, maneuvers)`:
+**Free left.** LEFT/SLIGHT_LEFT, the route's closest approach to the junction centre > 12 m, and the route already turning left 10 m before the junction (heading > 15° left of the approach 30–60 m back): a slip road that bypasses the signal. Free lefts are never claimed and cost no junction delay.
 
-1. Ignore OSRM maneuvers of type `depart` and `arrive` (`IGNORED_MANEUVERS`).
-2. Pick the maneuver nearest to the junction along the route, if it is within `LANE_MATCH_WINDOW_M = 40.0` m.
-3. If its `modifier` is `left`, `slight left` or `sharp left` (`LEFT_MODIFIERS`), the advisory is **`L`** (left lane).
-4. Otherwise (straight, any right turn, `uturn`, no modifier, or no maneuver within 40 m) it is **`R`** (the outer, overtaking lane). Other traffic is told to keep clear of that lane.
+**Lane advice** (lanes numbered from the kerb: lane 1 = leftmost). Lanes per direction from the OSRM free-flow speed of the approach (the fastest segment in the 30 m before the junction): ≥ 75 km/h EXPRESSWAY 3; 50–75 ARTERIAL (3 if ≥ 60, else 2); 32–50 COLLECTOR 2; < 32 LOCAL 1.
 
-Only the modifier counts, not the maneuver type. Maneuvers are placed on the polyline by OSRM's cumulative step distance and snapped to the nearest vertex within `MANEUVER_SNAP_M = 250.0` m (`backend/src/divert/services/routing.py`).
+| Movement | Lane |
+|---|---|
+| LEFT / SLIGHT_LEFT / SHARP_LEFT / free left / ROUNDABOUT exit 1 | 1 |
+| STRAIGHT, emergency leg | n (rightmost through lane; one lane: "centre, traffic pulls left") |
+| STRAIGHT, non-emergency leg | `ceil(n/2)` |
+| RIGHT / SHARP_RIGHT / SLIGHT_RIGHT / U_TURN / ROUNDABOUT exit ≥ 2 | n |
+
+`side`: lane 1 → `L`, lane n → `R`, a middle lane → `C`; on a one-lane road lefts `L`, rights/U-turns `R`, straight `C`. Moving k lanes needs `k × max(30 m, v × 5 s)`; `advise_at_m = along − max(that, 150 m)`, clipped to the previous junction (the first junction assumes the kerb lane). **Look-ahead:** a STRAIGHT junction whose next junction's lane change does not fit in between takes the next junction's lane (straight at J1, left 80 m later → lane 1 through J1, text "…, for the left turn 80 m after"). Text example: `Right lane (3 of 3): protected right turn`.
 
 ## 4. Vehicle profiles
 
@@ -86,14 +114,14 @@ Braking is the same for every vehicle (`BRAKE_MPS2 = 3.0`).
 
 ## 5. Speed model
 
-The speed model gives the highest allowed speed at every point of one route, for one vehicle, under one congestion factor and one set of pre-empted junctions (`SpeedProfile` in `backend/src/divert/services/speed_model.py`). The simulation moves vehicles with it and the ETA model integrates the same envelope, so prediction and simulation agree by construction.
+The speed model gives the highest allowed speed at every point of one route, for one vehicle, under one set of per-segment traffic factors, one set of pre-empted junctions and one stop line (`SpeedProfile` in `backend/src/divert/services/speed_model.py`). The simulation moves vehicles with it and the ETA model integrates the same envelope, so prediction and simulation agree by construction.
 
 ### 5.1 Segment cap
 
 For each route segment, with the OSRM free-flow speed `v_osrm` (OSRM `annotation.speed`; else that segment's distance/duration; else 0, which the floor below lifts to 1 m/s. If the annotations do not line up with the geometry, every segment gets the route's mean speed, or 10 m/s without a duration: `parse_osrm_route` in `backend/src/divert/services/routing.py`):
 
 ```text
-segment_cap = max(1, min(v_max, max(1, v_osrm) × congestion(hour) × 1.3))   [m/s]
+segment_cap = max(1, min(v_max, max(1, v_osrm) × factor × 1.3))   [m/s]
 ```
 
 | Term | Value | Source |
@@ -101,7 +129,10 @@ segment_cap = max(1, min(v_max, max(1, v_osrm) × congestion(hour) × 1.3))   [m
 | `v_max` | vehicle max speed | `PROFILES` |
 | floor on OSRM speed and on the result | 1.0 m/s | `MIN_SEGMENT_SPEED_MPS` |
 | emergency advantage (sirens, traffic yielding) | 1.3 | `EMERGENCY_ADVANTAGE` |
-| `congestion(hour)` | the city's factor for the local hour of the **simulation clock** | `congestion_at` in `backend/src/divert/services/eta.py`, `TrafficProfile.factor_for_hour` in `backend/src/divert/domain/models.py` |
+| `factor` | the segment's **traffic factor** at the simulation clock: class-aware congestion × incident zone (below) | `TrafficModel.segment_factors`, `ModelledTraffic` in `backend/src/divert/services/traffic.py` |
+| `1.3` | only on emergency legs; a non-emergency leg (`emergency=False`) drives at `v_osrm × factor` | `segment_cap_mps(..., emergency=)` |
+
+**Class-aware congestion:** `f_class = 1 − sensitivity × (1 − f_city)` with `f_city` the city's hourly factor (table 5.2) and sensitivity EXPRESSWAY/ARTERIAL 1.0, COLLECTOR 0.7, LOCAL 0.5 (road class from the segment's OSRM speed, [section 3](#3-corridor-movements-and-lane-advice)). **Incident zones:** every segment that comes within FIRE 250 m / CRIME 150 m / MEDICAL 50 m of another active incident is multiplied by 0.3 / 0.6 / 0.85 (the vehicle's own incident is exempt). The API takes the zones from PostGIS (active incidents), the worker from its own active vehicles - the same set. `TrafficModel` is the plug-in point for a live feed (TomTom/HERE/Google: needs a key and costs money).
 
 Implementation: `segment_cap_mps`. Factors must be in (0, 1.5] and there must be exactly 24 of them (`TrafficProfile.__post_init__`).
 
@@ -139,16 +170,17 @@ Share of OSRM free-flow speed that traffic allows in each local hour (`Asia/Kolk
 
 The tightest hour in every city is 18:00 (PM peak); the AM trough is 09:00.
 
-### 5.3 Junction caps
+### 5.3 Junction caps and stop lines
 
-Every corridor junction is a point speed cap (`junction_cap_mps`):
+Every corridor junction is a point speed cap:
 
 | Situation at this junction | Cap | Constant |
 |---|---|---|
-| The vehicle holds a claim on it in state `PREEMPTED` | 35 km/h (9.72 m/s) | `JUNCTION_PREEMPTED_MPS` |
-| Anything else: not yet claimed, or claimed but `CONFLICT` (another vehicle won) | 15 km/h (4.17 m/s) | `JUNCTION_NORMAL_MPS` |
+| Emergency leg, the vehicle's claim is served (`PREEMPTED`), or a free left | 35 km/h (9.72 m/s) | `JUNCTION_PREEMPTED_MPS` |
+| Anything else: not yet claimed, queued (`CONFLICT`), in a re-claim cool-down, or any junction on a non-emergency leg | 15 km/h (4.17 m/s) | `JUNCTION_NORMAL_MPS` |
+| A stop line where the vehicle must wait for green (`Vehicle.stop_at_m`) | 0 | |
 
-The simulation rebuilds the vehicle's profile whenever the congestion factor or its set of `PREEMPTED` claims changes (`SimulationEngine._motion_profile` in `backend/src/divert/services/simulation.py`). A non-pre-empted junction is a slow-down to 15 km/h, **not a stop**: red-light waiting is not simulated.
+A stop line is `junction along − box / 2` (box 20 m, 30 m with 5+ legs). A vehicle never passes an active stop line (the engine clamps the step there and stops it); the stop is lifted when the light is green for it. Emergency vehicles additionally obey a **speed advisory** (`step(..., cap_mps=)`: slow toward it at no more than the braking rate). The profile is rebuilt whenever the traffic factors, the served claims or the stop line change (`SimulationEngine._motion_profile`).
 
 ### 5.4 Arrival and the braking envelope
 
@@ -184,90 +216,102 @@ The cap is checked at tick positions only. With `dt = 0.5 s` a vehicle can cross
 
 | Element | What it is |
 |---|---|
-| `EtaQuery` | `route`, `service`, `city`, `corridor`, `along_m`, `speed_mps`, `at` (the simulation time; congestion uses the city-local hour of `at`) |
-| `EtaEstimate` | `to_destination_s`, and `to_signals_s`: a map of signal id to ETA for corridor signals at or ahead of `along_m` |
-| `EtaModel` | a `Protocol` with a `name` and `estimate(query) -> EtaEstimate`. It is the seam for a future learned model trained on `dispatches.predicted_eta_s` vs `actual_travel_s` |
-| `KinematicEtaModel` | the shipped model, `name = "kinematic-v1"` (stored in `dispatches.eta_model`) |
+| `EtaQuery` | `route`, `service`, `city`, `corridor`, `along_m`, `speed_mps`, `at` (simulation time), `emergency` (default true), `traffic` (a `TrafficModel`; default class-aware congestion without zones), `exempt_incident_id` |
+| `EtaEstimate` | `to_destination_s`, and `to_signals_s`: corridor key (`J`, `J#1`) → ETA for corridor entries at or ahead of `along_m` |
+| `EtaModel` | a `Protocol` with a `name` and `estimate(query) -> EtaEstimate` (seam for a learned model) |
+| `KinematicEtaModel` | the shipped model, `name = "kinematic-v3"` (stored in `dispatches.eta_model` and `dispatch_legs.eta_model`; v3 = RETURN legs replayed against the signal plans) |
 
-`KinematicEtaModel.estimate`:
+`KinematicEtaModel.estimate` integrates the same envelope the simulation uses, with the **same per-segment traffic factors**:
 
-1. Builds the profile with **every corridor junction pre-empted for the vehicle** (`plan_profile`), because that is what DIVERT plans for. A vehicle that never loses a conflict therefore arrives close to the predicted time. A conflict (15 km/h through a contested junction) makes the actual time longer than predicted, by design.
-2. Integrates the envelope analytically from the current `(along_m, speed_mps)` (`SpeedProfile.time_from`). Each interval is: accelerate at `a`, cruise at the cap, brake at `b` to the next knot's limit (`_interval_time`, closed form).
-3. Returns the time to the destination and to every corridor signal ahead. A signal projected a few centimetres past the route end gets the arrival time, not 0, so it is not claimed from the first tick (regression test `test_target_past_the_route_end_gets_the_arrival_time_not_zero`).
+1. **Emergency legs:** every corridor junction ahead pre-empted for the vehicle (35 km/h), the 1.3 advantage. A vehicle that never queues arrives at the predicted time (±10 %, `test_simulated_arrival_within_10pct_of_dispatch_eta`, `test_eta_within_10pct_with_incident_zones_and_class_congestion`; e2e `test_full_lifecycle_is_persisted`).
+2. **Non-emergency legs (RETURN):** replayed tick by tick (`services/obey.py` `replay`) with the simulation's own obey-the-signal motion - 15 km/h through junctions, no advantage, stop at the stop line on red / amber / all-red / pre-empted for another approach if it can still brake, go one tick after green - against the junctions' deterministic fixed plans (`PlanSignals` in the planner, the registry in the engine, re-replayed every 5 s). The waits predicted are the waits it will have unless another vehicle's pre-emption changes a plan meanwhile (±10 % on RETURN legs: `test_medical_chain_runs_every_leg_and_frees_the_unit_last`, `test_full_lifecycle_is_persisted`, `test_fire_and_crime_respond_then_return`). `kinematic-v2` used the expectation `red_share × red / 2` instead.
+3. A junction projected past the route end gets the arrival time, not 0.
 
-Profiles are cached per route object and per congestion factor (`KinematicEtaModel._cache`, a `WeakKeyDictionary`).
-
-Where it is called:
+Profiles are cached per route object and per traffic state (`TrafficModel.cache_key` + emergency flag). If the model returns a non-finite or negative ETA, the vehicle is failed.
 
 | Caller | When | Clock |
 |---|---|---|
-| `DispatchService._plans` | ranking candidates; the winner's value is stored as `predicted_eta_s` | `DispatchService.sim_clock`: the Redis key `divert:sim:clock` when the API's `DIVERT_SIM_TIME_SCALE ≠ 1`, else wall time; falls back to wall time if Redis or the key is unavailable |
-| `SimulationEngine._refresh_eta` | at start and every tick for every moving vehicle; feeds `eta_s` and the per-signal ETAs used for claiming | the worker's simulation clock |
+| `route_choice.score_route` (dispatch) | every route candidate; the chosen route's value is `predicted_eta_s` | `DispatchService.sim_clock` (Redis `divert:sim:clock` when `DIVERT_SIM_TIME_SCALE ≠ 1`, else wall time) |
+| `LegPlanner._score_routes` | every TRANSPORT / RETURN candidate at the leg's expected start | the worker's simulation clock (+ the remaining dwell) |
+| `SimulationEngine._start_leg` | the **prediction of record** of a TRANSPORT / RETURN leg, at departure (`leg_started`) | the worker's simulation clock |
+| `SimulationEngine._refresh_eta` | at start and every tick for every moving vehicle (RETURN: every 5 s, decremented in between); feeds `eta_s`, the claim ETAs and `signal_etas` | the worker's simulation clock |
 
-If the model returns a non-finite or negative ETA, the vehicle is failed (`_refresh_eta` raises, `tick` ends the vehicle as `failed`).
+## 7. Signals and pre-emption
 
-Accuracy target and evidence: see [NFR-02](01-specification.md#7-non-functional-requirements).
+Pure rules in `backend/src/divert/services/preemption.py` and `backend/src/divert/services/junctions.py`, the plan in `backend/src/divert/domain/signal_plan.py`, applied by `SimulationEngine._update_claims`, `_resolve_city` and `_obey_signals` every tick.
 
-## 7. Signal pre-emption
+### 7.1 Signal plans (synthetic, deterministic)
 
-Pure rules in `backend/src/divert/services/preemption.py`, applied by `SimulationEngine._update_claims` and `SimulationEngine._resolve_city` every tick.
+Every junction runs a **fixed-time split-phase plan**: one phase per approach (all movements of an approach, right turns protected), cycle 90 s (≤ 3 legs), 120 s (4), 150 s (5+) (stretched so every phase keeps 10 s of green), split equally, each slot = green + 3 s amber + 2 s all-red; offset = CRC-32 of the junction id mod the cycle, so `phase_at(junction, legs, t)` is a pure function. Approaches: OSRM intersection bearings when known (headings into the junction), else 4 approaches spaced evenly from the first observed approach (`JunctionGeometry`). A vehicle's phase is the approach nearest its approach bearing. Real timing plans are not available - this is an assumption.
 
-### 7.1 Thresholds
+### 7.2 When to claim (emergency legs only)
 
-| Rule | Condition | Default | Setting / constant |
-|---|---|---|---|
-| **Claim** a corridor signal not yet claimed | not past it **and** (`ETA_to_signal ≤ 45 s` **or** `signal.along_m − vehicle.along_m ≤ 600 m`) | 45 s, 600 m | `DIVERT_PREEMPT_LEAD_S`, `DIVERT_PREEMPT_DISTANCE_M`; `PreemptionRules.should_claim` |
-| **Past** a signal | `vehicle.along_m − signal.along_m > 20 m` | 20 m | `DIVERT_PREEMPT_RELEASE_PAST_M`; `PreemptionRules.is_past` |
-| **Release** a held claim | the vehicle is past it (reason `passed`) | | `_update_claims` |
-| **Release all** claims | on arrival (`arrived`), cleared, cancel (`cancelled`), any error while stepping (`failed`) | | `SimulationEngine._release_all`, called by `_arrive` and `_end` |
-| **Tie window** | claims whose ETA is within 5 s of the best ETA | 5 s | `DIVERT_CONFLICT_TIE_S`; `resolve` |
-
-Notes:
-
-- Both claim conditions use `≤`. A vehicle 0–20 m past an unclaimed signal can still claim it; beyond 20 m it never will.
-- Claims are owned **per vehicle id, never per vehicle type**. Two ambulances on one junction are two separate claims.
-- A signal skipped without a claim (passed by more than 20 m) is added to the vehicle's `passed` set and never considered again.
-
-### 7.2 Conflict resolution
-
-Every tick, for every signal with at least one claim (`resolve`):
-
-1. The lowest current ETA among the claimants is the best ETA.
-2. Claimants with `eta − best ≤ tie_s` are tied.
-3. The winner is the tied claimant with the best service priority (`SERVICE_PRIORITY`: `AMBULANCE` 0 > `FIRE_ENGINE` 1 > `POLICE` 2), then the lowest vehicle id (string order).
-4. The winner's claim is `PREEMPTED`; every other claim on that signal is `CONFLICT`.
-
-Resolution reruns every tick with fresh ETAs, so the winner can change as vehicles move. Outside the tie window a lower ETA beats a higher priority: a police car 20 s away beats an ambulance 25.1 s away (`test_tie_break_priority_then_id`).
-
-### 7.3 Signal states
-
-| State (`SignalState`) | Meaning | Stored / streamed? |
+| Rule | Value | Setting / code |
 |---|---|---|
-| `NORMAL` | no claim | never stored or streamed; absent from `divert:{city}:signals:active` |
-| `PREEMPTED` | exactly one claimant | yes |
-| `CONFLICT` | two or more claimants; `vehicle_id` is the winner | yes |
+| Claim when `ETA ≤ required_lead = T_transition + T_queue + 5 s` | | `PreemptionRules.should_claim`, `SimulationEngine._lead` |
+| `T_transition` | 0 if the vehicle's phase is green now (green extension); else rest of the current phase's 10 s minimum green + 3 s amber + 2 s all-red (or what is left of amber / all-red) | `transition_s` |
+| `T_queue` | `rate × red_elapsed × 2.0 s` per lane; rate/lane ARTERIAL & EXPRESSWAY 0.20, COLLECTOR 0.12, LOCAL 0.05 veh/s × `(2 − f_class)`; on green, minus the green already elapsed | `queue_clear_s` |
+| Always claim within | `max(v² / (2 × 3.0) + 50 m, 150 m)` ahead | `DIVERT_PREEMPT_MIN_CLAIM_DISTANCE_M` (alias `DIVERT_PREEMPT_DISTANCE_M`) |
+| Never claim with an ETA above | 90 s | `DIVERT_PREEMPT_MAX_LEAD_S` (alias `DIVERT_PREEMPT_LEAD_S`) |
+| Not claimed | free lefts; a junction whose stop line the leg never reaches (destination before it); during a re-claim cool-down | `must_cross`, `Vehicle.cooldown` |
 
-```mermaid
-stateDiagram-v2
-    [*] --> NORMAL
-    NORMAL --> PREEMPTED: first vehicle claims
-    PREEMPTED --> CONFLICT: a second vehicle claims
-    CONFLICT --> PREEMPTED: claimants drop to one
-    PREEMPTED --> NORMAL: last claim released
-    CONFLICT --> NORMAL: all claims released in one tick
-```
+The required lead is recomputed every tick; a claim, once made, is kept until release. A vehicle holds one pass of a junction at a time (`Vehicle.claims` is keyed by signal id; the claim records `pass_no`); the next pass is claimed after the previous one is released.
 
-### 7.4 Events
+### 7.3 Several claimants (`resolve_junction`)
 
-| Event (`HistoryEventType`) | When | event_id |
+1. Claimants on the **same phase are compatible** and are all served together.
+2. Otherwise the **winner** is the earliest ETA, unless a better priority rank is within `DIVERT_PRIORITY_WINDOW_S` (10 s, alias `DIVERT_CONFLICT_TIE_S`) of it: rank 0 ambulance with a patient (stage B), 1 ambulance responding, 2 fire engine, 3 police (`priority_rank`); ties: rank, ETA, vehicle id. The remaining phases are queued by the same rule.
+3. The order is recomputed every tick (a new higher-priority arrival re-sequences the queue), but a served phase whose vehicle is green and within 3 s of the junction is never bumped (`CROSSING_LOCK_S`).
+4. Served claims are `PREEMPTED`; queued claims are `CONFLICT` with an `expected_green_at` = previous phase's green + its 10 s minimum or its last vehicle clearing, whichever is later, + 5 s.
+5. **Speed advisory:** a claimant that would reach the stop line before its green slows to `distance / time to green` (never below 2 m/s); if even that is too early it stops at the stop line (`speed_advisory_mps` = 0). Back-to-back junctions: a vehicle never waits inside an earlier junction's box - it stops at that junction's stop line instead (`_shift_back`).
+
+### 7.4 Junction states (`JunctionState`)
+
+| State | Meaning |
+|---|---|
+| `NORMAL` | running its plan; never stored or streamed |
+| `TRANSITIONING` | clearing the current phase toward the served one (rest of min green, amber, all-red) |
+| `PREEMPTED` | the served phase is held green |
+| `QUEUED` | served and green, and an incompatible claimant waits |
+| `RECOVERING` | released: amber + all-red, the most-starved approach green for `DIVERT_PREEMPT_RECOVERY_S` (20 s), amber + all-red, then the plan |
+
+`CONFLICT` remains the per-vehicle label of a queued claimant (`SignalState`, persisted). `signals/active` lists every non-NORMAL junction with `state`, `phase_info` (`transition_s_left`, `expected_green_at`, `hold_s`, served phase, phases, cycle) and per-claimant `phase_state`, `movement`, `rank`, `queue_pos`; RECOVERING entries keep the last winner's legacy fields and no claimants.
+
+### 7.5 Release and failsafes
+
+| Rule | Value | Setting |
 |---|---|---|
-| `preemption_claimed` | first resolution of a new claim | `clm:<dispatch>:<signal>` |
-| `preemption_conflict` | each time a claim enters `CONFLICT` (including a new claim that starts as `CONFLICT`) | `cfl:<dispatch>:<signal>:<n>` (n = 1, 2, …) |
-| `preemption_released` | release, with `reason` `passed`, `arrived`, `cleared`, `cancelled` or `failed` | `rel:<dispatch>:<signal>` |
+| Release once past the junction box | 20 m past the centre (3–4 legs / unknown), 30 m (5+ legs) | `DIVERT_PREEMPT_RELEASE_PAST_M`, `DIVERT_PREEMPT_RELEASE_PAST_LARGE_M` |
+| Max hold: served and green but not at the junction | 60 s → release, outcome `TIMEOUT`; re-claim allowed after 2 × 5 s + recovery (30 s) | `DIVERT_PREEMPT_MAX_HOLD_S` |
+| Release all | on arrival, cancel, any error while stepping (and stage B: leg change, re-route) | `_release_all` |
+| Starvation | Prometheus `divert_signals_starved{city}`: junctions pre-empted > 50 % of the last 5 min (operators only; emergency vehicles still win) | `JunctionControl.is_starved` |
 
-A claim created and released within the same tick was never resolved and emits no event. In history (`signal_preemptions`), one row per claim keeps state `CONFLICT` if the claim ever lost a conflict (`HistoryWriter._preemption`).
+Outcomes (`PreemptOutcome`): `CLEARED` (passed / arrived), `TIMEOUT`, `CANCELLED` (cancel / failure), `REROUTED` (stage B).
+
+### 7.6 Non-emergency motion (`emergency=False`)
+
+Never claims. At each junction ahead within braking range (and whose stop line the leg reaches, not a free left): if its approach is not green - red, amber, all-red, or **pre-empted for another approach** - and the vehicle can still stop, it brakes at 3.0 m/s² to the stop line and waits; it goes when the light turns green (one tick later). Too close to stop on amber: it carries on through.
+
+### 7.7 Events
+
+| Event | When | event_id |
+|---|---|---|
+| `preemption_claimed` | first resolution of a new claim | `clm:<dispatch>:<signal>` (`…:<pass>:<attempt>` for a later pass or a re-claim) |
+| `preempt_transition` | a served claim's phase is not green yet (red truncation) | `ptr:…` |
+| `preempt_green` | the claim's phase is green for it | `pgr:…` |
+| `preemption_conflict` | each time a claim becomes `CONFLICT`; carries `winner`, `expected_green_at` | `cfl:…:<n>` |
+| `preempt_timeout` | max hold exceeded | `pto:…` |
+| `preemption_released` | release, with `reason` (`passed`, `arrived`, `timeout`, `cancelled`, `failed`) and `outcome` | `rel:…` |
+
+Every claim event payload carries the design §4.6 fields (`leg_seq`, `leg_kind`, `pass_no`, `attempt`, `rank`, `phase`, `movement`, `lane_index`, `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `phase_state_at_claim`, `green_at`; release adds `crossed_at`, `waited_s`, `outcome`). Until stage B's migration only `signal_preemptions`' existing columns are filled (a lane `C` is stored as NULL there); everything else lives in `incident_events.payload`.
 
 ## 8. Lifecycle state machines
+
+Stage B (design section 1): a dispatch is a sequence of **legs** - `RESPONSE` (station ->
+scene, emergency), `TRANSPORT` (scene -> hospital, emergency, AMBULANCE on MEDICAL only),
+`RETURN` (-> home station, **obeys signals**). `next_leg_kind` in `domain/enums.py` picks
+the next one; the LegPlanner (`services/planner.py`) plans TRANSPORT / RETURN when the
+previous leg ends.
 
 ### 8.1 Incident status
 
@@ -275,66 +319,98 @@ A claim created and released within the same tick was never resolved and emits n
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DISPATCHED: POST commits incident, dispatch and outbox row
-    DISPATCHED --> EN_ROUTE: en_route event persisted
-    EN_ROUTE --> ON_SCENE: arrived event persisted
-    ON_SCENE --> RESOLVED: cleared event persisted
+    [*] --> DISPATCHED: POST commits incident, dispatch, RESPONSE leg and outbox row
+    DISPATCHED --> EN_ROUTE: en_route persisted
+    EN_ROUTE --> ON_SCENE: arrived persisted
+    ON_SCENE --> RESOLVED: cleared persisted (FIRE / CRIME)
+    ON_SCENE --> TRANSPORTING: transport_started persisted (MEDICAL)
+    TRANSPORTING --> AT_HOSPITAL: arrived_hospital persisted
+    AT_HOSPITAL --> RESOLVED: handover_complete persisted
     DISPATCHED --> CANCELLED: DELETE incident
     EN_ROUTE --> CANCELLED: DELETE incident
     ON_SCENE --> CANCELLED: DELETE incident
-    DISPATCHED --> FAILED: failed event persisted
-    EN_ROUTE --> FAILED: failed event persisted
-    ON_SCENE --> FAILED: failed event persisted
+    DISPATCHED --> FAILED: failed persisted
+    EN_ROUTE --> FAILED: failed persisted
+    ON_SCENE --> FAILED: failed persisted
+    TRANSPORTING --> FAILED: failed persisted
     RESOLVED --> [*]
     CANCELLED --> [*]
     FAILED --> [*]
 ```
 
-Transitions only move forward and never leave a terminal status (`_FORWARD_FROM`):
+Transitions only move forward and never leave a terminal status (`_FORWARD_FROM`), with one
+exception: `cancel_rejected` restores the status a racing API cancel overwrote.
 
 | Target | Allowed from | Trigger | Timestamp set (first write wins) |
 |---|---|---|---|
 | `DISPATCHED` | (creation) | `POST …/incidents` | `reported_at` = `dispatched_at` = commit time |
 | `EN_ROUTE` | `OPEN`, `DISPATCHED` | `en_route` | `en_route_at` |
 | `ON_SCENE` | `OPEN`, `DISPATCHED`, `EN_ROUTE` | `arrived` | `on_scene_at` |
-| `RESOLVED` | any non-terminal | `cleared` | `resolved_at` |
+| `TRANSPORTING` | up to `ON_SCENE` | `transport_started` (also sets `hospital_station_id`) | `transport_started_at` |
+| `AT_HOSPITAL` | up to `TRANSPORTING` | `arrived_hospital` | `at_hospital_at` |
+| `RESOLVED` | any non-terminal | `cleared` (FIRE / CRIME) or `handover_complete` (MEDICAL) | `resolved_at` |
 | `CANCELLED` | any non-terminal | `DELETE …/incidents/{id}` (API), or `cancelled` event | `cancelled_at` |
 | `FAILED` | any non-terminal | `failed` (sets `failure_reason`, up to 2000 characters) | `failed_at` |
+| (restore) `TRANSPORTING` / `AT_HOSPITAL` / `RESOLVED` | `CANCELLED` | `cancel_rejected` (the worker refused the cancel) | clears `cancelled_at` |
 
-`OPEN` exists in the enum and is the database default, but **no code path writes it**: incidents are born `DISPATCHED`. Terminal statuses are `RESOLVED`, `CANCELLED`, `FAILED` (`TERMINAL_INCIDENT_STATUSES`).
+`OPEN` exists in the enum and is the database default, but **no code path writes it**. Terminal statuses are `RESOLVED`, `CANCELLED`, `FAILED` (`TERMINAL_INCIDENT_STATUSES`). The RETURN leg is not part of the incident: a MEDICAL incident is RESOLVED at the handover, a FIRE / CRIME one when the scene is cleared, while the unit is still driving back.
 
-### 8.2 Dispatch and vehicle status
+### 8.2 Dispatch, leg and vehicle status
 
-The worker's in-memory vehicle has only `EN_ROUTE` and `ON_SCENE` (`VehicleStatus` in `backend/src/divert/services/simulation.py`). `DISPATCHED` is the status the POST response reports before the worker has started the vehicle. A dispatch ends with `dispatches.end_reason` `CLEARED`, `CANCELLED` or `FAILED`.
+`dispatches.status` (`DispatchStatus`) covers the **whole trip** and only moves forward
+(`dispatch_statuses_before`): `DISPATCHED -> ON_SCENE -> [TRANSPORTING -> AT_HOSPITAL] ->
+RETURNING -> COMPLETED`, or `FAILED`. It stays open (`ended_at IS NULL`) until the unit is
+back in service; `end_reason` is `CLEARED`, `CANCELLED` or `FAILED`.
+
+The worker's vehicle keeps `phase` (the unit status) and the legacy `status`
+(`VehicleStatus`: `EN_ROUTE` while driving a leg, `ON_SCENE` while stopped). Between legs it
+**dwells** (`dwell_s` / `dwell_target_s`): on scene `DIVERT_SCENE_TIME_<SERVICE>_S`, at the
+hospital `DIVERT_HOSPITAL_HANDOVER_S`. The next leg is requested from the LegPlanner the
+moment a leg ends (`pending`), and starts when the dwell is over and its plan has arrived;
+until then the vehicle **waits in place** (`planning: true`).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DISPATCHED: API commit puts start_dispatch in the outbox
-    DISPATCHED --> EN_ROUTE: worker applies start_dispatch
-    DISPATCHED --> CANCELLED: cancel_dispatch arrives before the start
-    DISPATCHED --> FAILED: invalid start command or ETA error at start
-    EN_ROUTE --> ON_SCENE: along_m reaches length minus 0.5 m
-    EN_ROUTE --> CANCELLED: cancel_dispatch
-    EN_ROUTE --> FAILED: error while stepping or superseded
-    ON_SCENE --> CLEARED: scene time elapsed
-    ON_SCENE --> CANCELLED: cancel_dispatch
-    ON_SCENE --> FAILED: error or superseded
-    CLEARED --> [*]
-    CANCELLED --> [*]
-    FAILED --> [*]
+    [*] --> RESPONSE: worker applies start_dispatch
+    RESPONSE --> OnScene: arrived (plan_request: TRANSPORT or RETURN)
+    OnScene --> TRANSPORT: dwell over + leg_planned (MEDICAL)
+    OnScene --> RETURN: dwell over + leg_planned (FIRE / CRIME, or cancelled)
+    TRANSPORT --> AtHospital: arrived_hospital (plan_request: RETURN)
+    AtHospital --> RETURN: handover over + leg_planned
+    AtHospital --> BackInService: handover over, the hospital is its own station
+    RESPONSE --> Halting: cancel (claims released, brake 3 m/s2)
+    Halting --> RETURN: stopped + leg_planned (from where it stopped)
+    RETURN --> BackInService: arrived home
+    BackInService --> [*]
 ```
 
 | Event | Emitted by | Effect in PostgreSQL |
 |---|---|---|
-| `en_route` (`enr:`) | `SimulationEngine._announce` when the start command is applied | incident `EN_ROUTE` |
-| `arrived` (`arr:`) | `_arrive` | dispatch `arrived_at`, `actual_travel_s`, `est_time_saved_s`; incident `ON_SCENE`; unit `ON_SCENE` |
-| `cleared` (`clr:`) | `_end(..., "cleared")` | dispatch ended `CLEARED`; incident `RESOLVED`; unit `AVAILABLE` |
-| `cancelled` (`cxl:`) | `_end(..., "cancelled")` or `cancel_dispatch` for a dispatch never started | dispatch ended `CANCELLED`; incident `CANCELLED`; unit `AVAILABLE` |
-| `failed` (`fail:`) | `_end(..., "failed")`, `Worker._fail_unstarted`, `Worker._rebuild_from_pg` | dispatch ended `FAILED`; incident `FAILED` with reason; unit `AVAILABLE` |
+| `en_route` (`enr:`) | `SimulationEngine._announce` (RESPONSE start) | incident `EN_ROUTE` |
+| `arrived` (`arr:`) | `_leg_arrived` (RESPONSE) | dispatch `arrived_at`, `actual_travel_s`, `est_time_saved_s`, status `ON_SCENE`; incident `ON_SCENE`; unit `ON_SCENE` |
+| `leg_planned` (`leg-pln:`) | `apply_leg_planned` | timeline only (the planner wrote the `dispatch_legs` row) |
+| `leg_started` (`leg-st:`) | `_start_leg` (TRANSPORT / RETURN) | leg `started_at`, `started_trip_s`, the departure prediction (`predicted_eta_s`, `eta_model`) |
+| `leg_ended` (`leg-end:`) | `_leg_ended`, `_supersede_pending` | leg `ended_at`, `end_reason` (`ARRIVED` / `CANCELLED` / `FAILED` / `SUPERSEDED`), `actual_travel_s`, `ended_trip_s`, `reroutes` |
+| `leg_plan_failed` (`leg-pf:`) | `plan_failed` (planner retry) | timeline only |
+| `rerouted` (`rrt:`) | `apply_route_replaced` | leg route / speeds / distance / corridor = the spliced route, `reroutes` |
+| `transport_started` (`trs:`) | `_start_leg` (TRANSPORT) | incident `TRANSPORTING`, `hospital_station_id`; unit + dispatch `TRANSPORTING` |
+| `arrived_hospital` (`ahs:`) | `_leg_arrived` (TRANSPORT) | incident, unit, dispatch `AT_HOSPITAL` |
+| `handover_complete` (`hnd:`) | `_dwell_done` (hospital) | incident `RESOLVED` |
+| `cleared` (`clr:`) | `_dwell_done` (scene, FIRE / CRIME) | incident `RESOLVED` |
+| `returning` (`ret:`) | `_release_unit` (cleared, handover or cancel) | unit + dispatch `RETURNING` |
+| `back_in_service` (`bis:`) | `_finish` (RETURN arrived, or already home), cancel of a never-started dispatch, rebuild | dispatch ended (`COMPLETED`, `end_reason` CLEARED / CANCELLED); unit `AVAILABLE` |
+| `cancelled` (`cxl:`) | `_cancel`, or `cancel_dispatch` for a dispatch never started | incident `CANCELLED` |
+| `cancel_rejected` (`cxj:`) | `_cancel_rejected` (patient on board / already resolved) | restores the incident status |
+| `failed` (`fail:`) | `_end`, `Worker._fail_unstarted`, `Worker._rebuild_from_pg` | dispatch ended `FAILED`; incident `FAILED` with reason; unit `AVAILABLE` |
 
+Every leg event id carries the dispatch and the leg `seq`; a claim's ids add `s<seq>` for
+legs after the first, so the same junction claimed on two legs has two rows.
 Failure reasons produced by the code: `simulation error: <exception>` (cut to 500 characters), `superseded by a new dispatch`, `invalid start command`, `rebuild failed: <exception>`.
 
-`start_dispatch` is idempotent. A duplicate for a running dispatch, or for one listed in the per-city finished set (`divert:{city}:finished`, kept `DIVERT_FINISHED_DISPATCH_TTL_S` = 86 400 s), is only acknowledged (`SimulationEngine.start_dispatch`).
+`start_dispatch` and `leg_planned` are idempotent: a duplicate start for a running or
+finished dispatch is only acknowledged; a `leg_planned` applies only while the vehicle
+waits for exactly that (dispatch, seq), and `route_replaced` only for the next re-route
+number of the current leg.
 
 ### 8.3 Unit status
 
@@ -345,40 +421,58 @@ stateDiagram-v2
     [*] --> AVAILABLE: seed inserts missing units
     AVAILABLE --> DISPATCHED: dispatch transaction locks it with SKIP LOCKED
     DISPATCHED --> ON_SCENE: arrived persisted
-    DISPATCHED --> AVAILABLE: cleared, cancelled or failed persisted
-    ON_SCENE --> AVAILABLE: cleared, cancelled or failed persisted
+    ON_SCENE --> TRANSPORTING: transport_started persisted
+    TRANSPORTING --> AT_HOSPITAL: arrived_hospital persisted
+    DISPATCHED --> RETURNING: returning persisted (cancelled en route)
+    ON_SCENE --> RETURNING: returning persisted (cleared or cancelled)
+    AT_HOSPITAL --> RETURNING: returning persisted (handover complete)
+    RETURNING --> AVAILABLE: back_in_service persisted
+    DISPATCHED --> AVAILABLE: failed persisted
     AVAILABLE --> OUT_OF_SERVICE: re-seed deactivates its station
 ```
 
 | Move | Guard | Code |
 |---|---|---|
 | `AVAILABLE → DISPATCHED` | the row is `AVAILABLE` inside its own row lock; sets `current_dispatch_id` | `IncidentRepository.create_dispatch` |
-| `DISPATCHED → ON_SCENE` | `current_dispatch_id` = this dispatch and status `DISPATCHED` | `HistoryWriter._arrived` |
-| `→ AVAILABLE` | `current_dispatch_id` = this dispatch (a unit already on a newer dispatch is not touched); clears `current_dispatch_id` | `HistoryWriter._ended` |
+| forward moves | `current_dispatch_id` = this dispatch and the status is an earlier one (`_UNIT_FROM`) | `HistoryWriter._unit` |
+| `→ AVAILABLE` | `current_dispatch_id` = this dispatch; only `back_in_service` or `failed` (the unit is freed when its RETURN leg ends) | `HistoryWriter._free_unit` |
 | `AVAILABLE → OUT_OF_SERVICE` | its station vanished from the snapshot on re-seed | `seed_city` |
 
-Known gap: **no code path moves a unit out of `OUT_OF_SERVICE`**. A re-seed reactivates a returning station but does not reset its units, because it never touches an existing unit's status.
-
-On cancel, the unit stays `DISPATCHED`/`ON_SCENE` until the worker's `cancelled` event is persisted (`test_cancel_writes_cancel_command_and_is_idempotent`, `test_cancel_frees_the_unit_after_the_worker_confirms`).
+A RETURNING unit is busy (`current_dispatch_id` set, `ck_units_busy_has_dispatch`) and is
+not dispatchable in this version (design known limit). Known gap: **no code path moves a
+unit out of `OUT_OF_SERVICE`**.
 
 ## 9. Scene time, cancellation, time saved, simulation clock
 
-### 9.1 Scene time
+### 9.1 Dwell times
 
-After arrival the vehicle stays `ON_SCENE`, accumulating `scene_s` by `dt` each tick. When `scene_s ≥ DIVERT_SCENE_TIME_S` (default 120 simulated seconds, `Settings.scene_time_s`, `SimConfig.scene_time_s`) it is ended as `cleared`: incident `RESOLVED`, unit `AVAILABLE`. Scene time is not sampled; a vehicle rebuilt from PostgreSQL after a failover resumes with `scene_s = min(scene time, wall time since arrival × time scale)` (`Worker._vehicle_from_pg`).
-
-### 9.2 Cancellation
-
-| Step | Rule | Code |
+| Setting | Default (assumption) | Dwell |
 |---|---|---|
-| API | Locks the incident row. Already `CANCELLED` → `200` with the same body (idempotent). `RESOLVED`/`FAILED` → `409 invalid_state`. Unknown id, or id from another city → `404 not_found`. | `DispatchService.cancel_incident` |
-| API | Sets `CANCELLED` and `cancelled_at`, adds a `cancel_requested` event (`cxr:`). If the incident has an open dispatch (`ended_at IS NULL`), writes a `cancel_dispatch` command (`reason` "cancelled by operator") to the outbox in the same transaction. | `IncidentRepository.mark_cancelled` |
-| Worker, vehicle running | Releases every claim, removes the vehicle, emits `cancelled` + `vehicle_removed` (reason `cancelled`). | `SimulationEngine.cancel_dispatch` → `_end` |
-| Worker, already finished | Acknowledges only. | same |
-| Worker, never started | Still emits `cancelled` (so the persister frees the unit) and marks the dispatch finished, so a late `start_dispatch` is ignored. | same |
-| Persister | Ends the dispatch `CANCELLED`, frees the unit. | `HistoryWriter._ended` |
+| `DIVERT_SCENE_TIME_AMBULANCE_S` | 480 s | on-scene care and loading |
+| `DIVERT_SCENE_TIME_FIRE_ENGINE_S` | 1200 s | firefighting / scene work |
+| `DIVERT_SCENE_TIME_POLICE_S` | 600 s | police scene work |
+| `DIVERT_HOSPITAL_HANDOVER_S` | 600 s | patient handover at the emergency department |
+| `DIVERT_SCENE_TIME_S` | unset | deprecated: if set, the scene time of every service whose own setting is not set (`Settings.scene_time_for`) |
 
-Cancelling an `ON_SCENE` incident is allowed; it ends the scene early.
+Dwell is accumulated in simulated seconds (`dwell_s`, legacy `scene_s`) and is not sampled;
+a vehicle rebuilt from PostgreSQL resumes with `dwell_s = min(target, wall time since the
+leg ended × time scale)` (`Worker._rebuild_stopped`). The plan for the next leg is
+requested when the leg ends, so planning overlaps the dwell.
+
+### 9.2 Cancellation (per phase)
+
+| Phase when cancelled | API | Worker |
+|---|---|---|
+| RESPONSE (incident `DISPATCHED` / `EN_ROUTE`) | `200`, incident `CANCELLED`, `cancel_dispatch` in the outbox | `leg_ended` CANCELLED, every claim released (outcome `CANCELLED`), the vehicle brakes at 3 m/s² to `halt_at_m = along + v²/(2·3)`, the unit is released (`returning`) and a RETURN is requested **from the halt point** |
+| ON_SCENE | `200`, `CANCELLED` | the dwell ends; a pending TRANSPORT is superseded (`leg_ended` SUPERSEDED + `plan_cancel`); RETURN from the scene |
+| TRANSPORTING / AT_HOSPITAL | **`409 cannot_cancel_transport`** (`details.status`), nothing written | (if a race lets the command through: `cancel_rejected`, the persister restores the status) |
+| RESOLVED / CANCELLED (unit returning or back) | `200`, unchanged (idempotent) | - |
+| FAILED | `409 invalid_state` | - |
+| never started | as RESPONSE | `cancelled` + `back_in_service` (CANCELLED); the dispatch is marked finished so a late `start_dispatch` is ignored |
+
+The unit stays busy (`RETURNING`) until the RETURN leg ends; then the dispatch is
+`COMPLETED` with `end_reason` `CANCELLED`. A unit that stops within 30 m of its station
+(`legs.AT_HOME_M`) needs no RETURN leg.
 
 ### 9.3 Estimated time saved
 
@@ -388,8 +482,8 @@ est_time_saved_s = preempted_passed × city.avg_junction_delay_s
 
 - `preempted_passed` counts corridor junctions the vehicle **passed** (released with reason `passed`) while its claim on them was `PREEMPTED` (`SimulationEngine._release`). Claims released on arrival do not count, nor do claims in `CONFLICT`.
 - `avg_junction_delay_s`: Delhi 35 s, Kolkata 40 s, Bengaluru 40 s ([table](#52-hourly-congestion-factors)).
-- Computed at arrival (`SimulationEngine._arrive`), stored in `dispatches.est_time_saved_s`; the live value is `preempted_passed` on each vehicle.
-- It is **always labelled an estimate**. It assumes each such junction would otherwise have cost the city's average delay. It is not derived from the speed model, which never simulates a red-light stop (see the [worked example](#10-worked-example-one-ambulance-one-junction): 35 s estimated vs about 2.9 s of modelled slow-down).
+- Computed at the RESPONSE arrival (`SimulationEngine._leg_arrived`), stored in `dispatches.est_time_saved_s`; the live value is `preempted_passed` on each vehicle (whole trip, TRANSPORT included).
+- It is **always labelled an estimate**. It assumes each such junction would otherwise have cost the city's average delay. It is not derived from the speed model (see the [worked example](#10-worked-example-one-ambulance-one-junction)).
 
 ### 9.4 Simulation clock and time scale
 
@@ -400,7 +494,7 @@ est_time_saved_s = preempted_passed × city.avg_junction_delay_s
 | Scale ≠ 1 | the clock advances by `dt` per tick and is written to `divert:sim:clock` (epoch seconds) every tick, so it survives failover; a new leader resumes from it, or from wall time if absent | `Worker._heartbeat`, `Worker._load_sim_clock` |
 | Freeze | simulated time only advances while a leader ticks; during a leader change it is frozen | `Worker._lead` |
 | Congestion | uses the city-local hour of the simulation clock, in the worker and in the API's dispatch ETA | `congestion_at` |
-| Timestamps vs durations | event `ts`, `claimed_at`, `released_at` are **wall clock**; `elapsed_s`, `travel_s`, `scene_s` are **simulated seconds** | `SimulationEngine` |
+| Timestamps vs durations | event `ts`, `claimed_at`, `released_at` are **wall clock**; `elapsed_s` (per leg), `travel_s`, `dwell_s`, `trip_s` (since the dispatch) are **simulated seconds** | `SimulationEngine` |
 | Position samples | one `vehicle_position` every `DIVERT_POSITION_SAMPLE_S` (default 5) simulated seconds, sample 0 at start | `SimulationEngine._sample` |
 | Rebuild | a vehicle rebuilt from PostgreSQL resumes from the last sample's simulated `elapsed_s`, never from wall-clock differences | `Worker._vehicle_from_pg` |
 | Tick number | one engine-wide counter, incremented once per tick, written per city to `divert:{city}:tick`; a new leader resumes from the highest stored value | `SimulationEngine.tick`, `last_tick_no` in `backend/src/divert/store/live.py` |
@@ -411,16 +505,16 @@ Response time in analytics = (`dispatched_at − reported_at`) + `actual_travel_
 
 ## 10. Worked example: one ambulance, one junction
 
-Produced by running `KinematicEtaModel` and `SimulationEngine` (no Redis, no database) on a stub route, with default settings. All numbers below are program output, rounded.
+Produced by running `KinematicEtaModel` and `SimulationEngine` (no Redis, no database) on a stub route, with default settings (`.work/stage5a/worked_example.py`). All numbers below are program output, rounded.
 
 **Setup**
 
 | Input | Value |
 |---|---|
-| City, clock | Delhi, simulation clock 02:30 IST, so hour 2, congestion 0.93 |
-| Vehicle | `AMBULANCE`: max 22.22 m/s, accel 2.0 m/s², brake 3.0 m/s² |
-| Route | 2000 m straight, 40 segments of 50 m, OSRM speed 15 m/s everywhere |
-| Corridor | one junction `J1` at `along_m = 1500` |
+| City, clock | Delhi, simulation clock 02:30 IST, so hour 2, city factor 0.93 |
+| Vehicle | `AMBULANCE`: max 22.22 m/s, accel 2.0 m/s², brake 3.0 m/s², emergency leg (rank 1) |
+| Route | 2000 m straight east, 40 segments of 50 m, OSRM speed 15 m/s (54 km/h: ARTERIAL, sensitivity 1.0 → factor 0.93) |
+| Corridor | one junction `J1` at `along_m = 1500`, legs unknown (4 assumed: 120 s cycle, offset 76.746 s, synthetic approaches from the first observed approach, 90°) |
 | Tick | 0.5 s, time scale 1 |
 
 **Derived caps**
@@ -429,9 +523,7 @@ Produced by running `KinematicEtaModel` and `SimulationEngine` (no Redis, no dat
 |---|---|---|
 | Segment cap | min(22.22, 15 × 0.93 × 1.3) | **18.135 m/s** (65.3 km/h) |
 | Junction cap if pre-empted | 35 km/h | 9.722 m/s |
-| Junction cap if not | 15 km/h | 4.167 m/s |
 | Braking starts (pre-empted) | (18.135² − 9.722²) / (2 × 3) = 39.1 m before J1 | at 1460.9 m |
-| Braking starts (not pre-empted) | (18.135² − 4.167²) / (2 × 3) = 51.9 m before J1 | at 1448.1 m |
 | Predicted ETA to J1 at dispatch | 9.07 s accelerating + 76.03 s cruising + 2.80 s braking | **87.90 s** |
 | Predicted ETA to destination | 87.90 + 31.25 s for the last 500 m | **119.14 s** |
 
@@ -439,22 +531,20 @@ Produced by running `KinematicEtaModel` and `SimulationEngine` (no Redis, no dat
 
 | Tick | Sim time | `along_m` | Speed | What happened |
 |---:|---:|---:|---:|---|
-| 0 | 0 s | 0 | 0 | start command applied: `en_route` (`enr:…`) and position sample 0 (`pos:…:0`) |
-| 1–19 | 0.5–9.5 s | 0.25 → 90.0 | 1.0 → 18.135 m/s | accelerates at 2 m/s² (1 m/s per tick) to the segment cap |
-| 85 | 42.5 s | 688.5 | 18.135 | ETA to J1 = 45.40 s > 45 s and 811 m away > 600 m: no claim yet |
-| **86** | 43.0 s | **697.6** | 18.135 | ETA to J1 = **44.90 s ≤ 45 s → claim**. `preemption_claimed`, state `PREEMPTED`, `eta_at_claim_s` 44.9. The ETA rule fired 802 m before J1, before the 600 m distance rule would have |
-| 87–170 | | → 1459.2 | 18.135 | cruising; the profile now uses the 35 km/h cap at J1 |
-| 171 | 85.5 s | 1468.3 | 16.875 | braking at 3 m/s² inside the envelope |
-| 175 | 87.5 s | 1497.3 | 10.521 | last tick before J1 |
-| 176 | 88.0 s | 1502.6 | 10.521 | crossed J1 at about 10.5 m/s: the cap is checked at tick positions, so it is slightly above 9.72 |
-| 177–178 | | → 1514.1 | → 12.5 | accelerating again at 2 m/s²; still holding the claim (≤ 20 m past) |
-| **179** | 89.5 s | **1520.6** | 13.521 | **20.6 m past J1 → release**. `preemption_released`, reason `passed`; `preempted_passed` = 1 |
+| 0–1 | 0–0.5 s | 0 → 0.2 | 0 → 1 | start command applied: `en_route` (`enr:…`) and position sample 0 |
+| 1–19 | 0.5–9.5 s | → 90.0 | → 18.135 m/s | accelerates at 2 m/s² to the segment cap |
+| 2–117 | | → 978.6 | 18.135 | ETA to J1 above the required lead, and more than 150 m away: no claim (the old fixed rule would have claimed at tick 86, ETA 44.9 s) |
+| **118** | 59.0 s | **987.7** | 18.135 | ETA to J1 = **28.9 s ≤ required lead 29.4 s** = transition 5.0 s (another phase green past its 10 s minimum: amber + all-red) + queue 19.4 s (ARTERIAL 0.20 veh/s/lane × (2 − 0.93), red for about 45 s since phase 0's last green, 2.0 s headway) + 5 s margin. `preemption_claimed` (`red_truncate`) and `preempt_transition`; J1 is **TRANSITIONING**, green expected in 5.0 s |
+| **128** | 64.0 s | 1078.4 | 18.135 | J1's phase 0 is green for it: `preempt_green`; J1 is **PREEMPTED** (held green), the profile uses the 35 km/h cap |
+| 171–175 | 85.5–87.5 s | → 1497.3 | → 10.52 | braking at 3 m/s² inside the envelope |
+| 176 | 88.0 s | 1502.6 | 10.52 | crossed J1 at about 10.5 m/s (the cap is checked at tick positions); held green for 24 s |
+| **179** | 89.5 s | **1520.6** | 13.52 | **20.6 m past J1 (box 20 m) → release**, reason `passed`, outcome `CLEARED`; `preempted_passed` = 1. J1 is **RECOVERING**: amber + all-red, then phase 1 (the approach that had waited longest) green for 20 s, amber + all-red, back on its plan at 119.5 s |
 | 237 | 118.5 s | 2000.0 | 0 | **arrived**: `travel_s` 118.5 s vs predicted 119.14 s (−0.5 %); `est_time_saved_s` = 1 × 35 = **35.0 s** |
-| 477 | 238.5 s | 2000.0 | 0 | `scene_s` reaches 120 s (240 ticks on scene): `cleared` (`clr:…`), vehicle removed; once persisted, incident `RESOLVED` and unit `AVAILABLE` |
+| 477 | 238.5 s | 2000.0 | 0 | `scene_s` reaches 120 s: `cleared`, vehicle removed; once persisted, incident `RESOLVED` and unit `AVAILABLE` |
 
-For comparison, the same ETA model with J1 **not** pre-empted predicts 122.0 s. In the model's own physics, pre-emption saved about 2.9 s here, while the labelled estimate says 35 s, because the estimate assumes a red-light wait the speed model never simulates.
+For comparison, the same ETA model with J1 **not** pre-empted (15 km/h) predicts 122.0 s; a vehicle obeying J1's plan would also have waited for its green. The labelled 35 s estimate assumes the city's average junction delay.
 
-Event ids in this run (dispatch id `00000000-0000-0000-0000-000000000001`, hyphens stripped): `clm:00000000000000000000000000000001:J1`, `rel:00000000000000000000000000000001:J1`, `arr:00000000000000000000000000000001`.
+Event ids in this run (dispatch id `00000000-0000-0000-0000-000000000001`, hyphens stripped): `clm:00000000000000000000000000000001:J1`, `ptr:…:J1`, `pgr:…:J1`, `rel:00000000000000000000000000000001:J1`, `arr:00000000000000000000000000000001`.
 
 ## Related
 

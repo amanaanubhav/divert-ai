@@ -239,7 +239,7 @@ sequenceDiagram
 | Table | Rows | Values |
 |---|---|---|
 | `incidents` | 1 insert | `status` DISPATCHED, `type`, `reported_type` (raw, first 32 chars), `geom`, `description`, `reported_at` = `dispatched_at` = now |
-| `dispatches` | 1 insert | `route` (LineString), `distance_m`, `predicted_eta_s`, `corridor` (JSONB), `segment_speeds_mps`, `eta_model` (`kinematic-v1`), `dispatched_at` |
+| `dispatches` | 1 insert | `route` (LineString), `distance_m`, `predicted_eta_s`, `corridor` (JSONB), `segment_speeds_mps`, `eta_model` (`kinematic-v3`), `dispatched_at`, `status` (DISPATCHED); plus the RESPONSE row of `dispatch_legs` (seq 0) |
 | `units` | 1 update | `status` DISPATCHED, `current_dispatch_id`, `status_changed_at`, only `WHERE status = 'AVAILABLE'` |
 | `incident_events` | 2 inserts | `rep:<incident hex>` type `reported`; `dsp:<dispatch hex>` type `dispatched` |
 | `outbox` | 1 insert | `topic` = `commands`, `payload` = the start command, `sent_at` NULL |
@@ -375,15 +375,26 @@ sequenceDiagram
 | `type` | Producer | Field names |
 |---|---|---|
 | `snapshot` | api `build_snapshot` | `city`, `tick`, `sim_ts`, `vehicles[]` (the `PUBLIC_FIELDS` of `api/v1/vehicles.py` plus `route` points and `corridor`), `signals[]` |
-| `tick` | worker `SimulationEngine.tick` | `city`, `tick`, `sim_ts`, `ts`, `vehicles[]` (`id`, `dispatch_id`, `incident_id`, `service`, `status`, `pos`, `heading`, `speed_mps`, `eta_s`, `along_m`, `distance_m`, `preempted_passed`), `signals[]` (the complete non-NORMAL set) |
-| `vehicle_added` | worker `SimulationEngine._announce` | `city`, `vehicle` (tick fields + `station_id`, `incident_type`, `predicted_eta_s`, `started_at`), `route` (points), `corridor`, `destination` |
-| `vehicle_removed` | worker `SimulationEngine._end` | `city`, `vehicle_id`, `dispatch_id`, `incident_id`, `reason` (`cleared`, `cancelled`, `failed`) |
-| `incident_updated` | worker (`EN_ROUTE`, `ON_SCENE`, `RESOLVED`, `CANCELLED`, `FAILED`) and api (`DISPATCHED`, `CANCELLED`) | `city`, `incident_id`, `status`, `ts`; worker adds `dispatch_id`, `vehicle_id` and one of `eta_s`, `travel_s`, `reason`; api adds `incident` (the API's DISPATCHED message also has `dispatch_id` and `vehicle_id`) |
+| `tick` | worker `SimulationEngine.tick` | `city`, `tick`, `sim_ts`, `ts`, `vehicles[]` (`id`, `dispatch_id`, `incident_id`, `service`, `status`, `phase`, `leg`, `destination`, `destination_info`, `planning`, `pos`, `heading`, `speed_mps`, `eta_s`, `preempted_passed`, `next_movement`, `speed_advisory_mps`, `along_m`, `distance_m`), `signals[]` (the complete non-NORMAL set) |
+| `vehicle_added` | worker `SimulationEngine._announce` (start, and again at every later leg) | `city`, `vehicle` (tick fields + `station_id`, `incident_type`, `predicted_eta_s`, `started_at`), `route` (points), `corridor`, `destination` |
+| `leg_changed` | worker `SimulationEngine._start_leg` | `city`, `vehicle_id`, `dispatch_id`, `incident_id`, `phase`, `leg`, `destination`, `destination_info`, `predicted_eta_s`, `route`, `corridor`, `hospital` |
+| `route_replaced` | worker `SimulationEngine.apply_route_replaced` | `city`, `vehicle_id`, `dispatch_id`, `incident_id`, `leg`, `reroute_no`, `reason`, `saved_s`, `route`, `corridor` |
+| `vehicle_removed` | worker `SimulationEngine._remove` (from `_finish` / `_end`) | `city`, `vehicle_id`, `dispatch_id`, `incident_id`, `reason` (`back_in_service`, `failed`) |
+| `incident_updated` | worker (`EN_ROUTE`, `ON_SCENE`, `TRANSPORTING`, `AT_HOSPITAL`, `RESOLVED`, `CANCELLED`, `FAILED`; a refused cancel re-sends the real status) and api (`DISPATCHED`, `CANCELLED`) | `city`, `incident_id`, `status`, `ts`; worker adds `dispatch_id`, `vehicle_id` and one of `eta_s`, `travel_s`, `reason`; api adds `incident` (the API's DISPATCHED message also has `dispatch_id` and `vehicle_id`) |
 | `pong` | api `_receive` | none (reply to the client's `{"type": "ping"}`) |
 
 A `tick` is published only for a city that has vehicles, plus one final tick when its
 last vehicle or signal is removed (`SimulationEngine.tick`). The tick number is one
 engine-wide counter, so per city it is monotonic but not dense.
+
+### 3c. Leg planning (LegPlanner, inside the leader)
+
+| Hop | Payload |
+|---|---|
+| engine batch -> planner | `plan_request`: `city`, `dispatch_id`, `incident_id`, `vehicle_id`, `service`, `station_id`, `incident_type`, `seq`, `kind`, `origin`, `home`, `incident_location`, `requested_t`, `start_at`; `reroute_request`: + `reroute_no`, `reason`, `origin_along_m`, `destination`, `remaining_s`, `at_t`; `plan_cancel`: `dispatch_id`, `seq` |
+| planner -> PostgreSQL (one transaction) | `dispatch_legs` row (`NewLeg.values`) + `outbox` row (topic `commands`, payload = the command) |
+| planner -> `divert:commands` | `leg_planned`: `command_id` `leg:<dispatch>:<seq>`, `seq`, `kind`, `emergency`, `route` (points, speeds), `corridor`, `destination` {kind, station_id, name, location}, `predicted_eta_s`, `route_choice`, `hospital`, `planned_at`; `route_replaced`: `command_id` `rrt:<dispatch>:<seq>:<n>`, `reroute_no`, `origin_along_m`, `route`, `corridor`, `saved_s`, `old_remaining_s`, `new_remaining_s`, `reason`, `route_choice` |
+| leader -> Redis (tick) | the vehicle's `pending` leg (live JSON), route of the new leg (`route:{vehicle}`), `junctions` HASH entries for junction geometry fixed this tick |
 
 ---
 
@@ -432,14 +443,29 @@ insert is a duplicate, the event's other effects are skipped too.
 | Event (`event_id` format) | Extra fields | PostgreSQL effect |
 |---|---|---|
 | `en_route` (`enr:<dispatch>`) | `station_id`, `service`, `predicted_eta_s`, `distance_m` | incident EN_ROUTE, `en_route_at` |
-| `vehicle_position` (`pos:<dispatch>:<n>`) | `pos`, `speed_mps`, `along_m`, `elapsed_s`, `sample` | `vehicle_positions` row keyed by `(dispatch_id, ts)`, including `elapsed_s` (migration 0003) |
-| `preemption_claimed` (`clm:<dispatch>:<signal>`) | `signal_id`, `claim_event_id`, `state`, `lane`, `approach_bearing`, `eta_at_claim_s`, `claimed_at`, `eta_s` | `signal_preemptions` row keyed by `claim_event_id` |
+| `vehicle_position` (`pos:<dispatch>:<n>`, later legs `pos:<dispatch>:s<seq>:<n>`) | `pos`, `speed_mps`, `along_m`, `elapsed_s`, `sample`, `leg_seq`, `trip_s` | `vehicle_positions` row keyed by `(dispatch_id, ts)`, including `elapsed_s` (0003) and `leg_seq` (0004) |
+| `preemption_claimed` (`clm:<dispatch>:<signal>`; later passes / re-claims / legs add `:<pass>:<attempt>` and `:s<seq>`) | `signal_id`, `claim_event_id`, `state`, `lane`, `approach_bearing`, `eta_at_claim_s`, `claimed_at`, `eta_s`, `leg_seq`, `leg_kind`, `pass_no`, `attempt`, `rank`, `phase`, `movement`, `lane_index`, `lanes_total`, `free_left`, `required_lead_s`, `transition_s`, `queue_clear_s`, `phase_state_at_claim`, `green_at` | `signal_preemptions` row keyed by `claim_event_id`, every section 4.6 column (lane `C` stored since 0004) |
 | `preemption_conflict` (`cfl:<dispatch>:<signal>:<n>`) | claim fields + `winner`, `eta_s` | that row's `state` = CONFLICT |
-| `preemption_released` (`rel:<dispatch>:<signal>`) | claim fields + `released_at`, `reason` | that row's `released_at` (earliest kept; inserted with the claim data if missing) |
-| `arrived` (`arr:<dispatch>`) | `pos`, `travel_s`, `predicted_eta_s`, `est_time_saved_s`, `preempted_passed` | dispatch `arrived_at`, `actual_travel_s`, `est_time_saved_s`; incident ON_SCENE; unit ON_SCENE if still DISPATCHED on this dispatch |
-| `cleared` (`clr:<dispatch>`) | `scene_s` | dispatch `ended_at`, `end_reason` CLEARED; incident RESOLVED; unit AVAILABLE if still on this dispatch |
-| `cancelled` (`cxl:<dispatch>`) | `reason` | dispatch ended CANCELLED; incident CANCELLED; unit AVAILABLE |
-| `failed` (`fail:<dispatch>`) | `reason` | dispatch ended FAILED; incident FAILED + `failure_reason`; unit AVAILABLE |
+| `preempt_green` (`pgr:...`) | claim fields | that row's `green_at`, `phase_state_at_claim` (first write wins) |
+| `preempt_transition` (`ptr:...`), `preempt_timeout` (`pto:...`) | claim fields + `transition_s_left` / `hold_s`, `max_hold_s` | timeline only |
+| `preemption_released` (`rel:<dispatch>:<signal>`) | claim fields + `released_at`, `reason`, `outcome`, `crossed_at`, `waited_s` | that row's `released_at`, `outcome`, `crossed_at`, `waited_s` (earliest kept; inserted with the claim data if missing) |
+| `arrived` (`arr:<dispatch>`) | `pos`, `travel_s`, `predicted_eta_s`, `est_time_saved_s`, `preempted_passed`, `trip_s` | dispatch `arrived_at`, `actual_travel_s`, `est_time_saved_s`, status ON_SCENE; incident ON_SCENE; unit ON_SCENE if still DISPATCHED on this dispatch |
+| `cleared` (`clr:<dispatch>`) | `scene_s`, `trip_s` | incident RESOLVED (FIRE / CRIME) |
+| `leg_planned` (`leg-pln:<dispatch>:<seq>`) | `seq`, `kind`, `emergency`, `distance_m`, `predicted_eta_s`, `destination` | timeline only (the LegPlanner wrote the `dispatch_legs` row with its outbox command) |
+| `leg_plan_failed` (`leg-pf:<dispatch>:<seq>:<n>`) | `seq`, `kind`, `attempt`, `error` | timeline only |
+| `leg_started` (`leg-st:<dispatch>:<seq>`) | `seq`, `kind`, `emergency`, `predicted_eta_s`, `distance_m`, `destination`, `trip_s`, `eta_model` | leg `started_at`, `started_trip_s`, the prediction of record (`predicted_eta_s`, `eta_model`) |
+| `leg_ended` (`leg-end:<dispatch>:<seq>`) | `seq`, `kind`, `end_reason`, `started`, `travel_s`, `predicted_eta_s`, `distance_m`, `trip_s`, `reroutes` | leg `ended_at`, `end_reason`, `actual_travel_s`, `ended_trip_s`, `reroutes` |
+| `rerouted` (`rrt:<dispatch>:<seq>:<n>`) | `seq`, `reroute_no`, `reason`, `saved_s`, `route`, `corridor`, `route_choice`, ... | leg `route`, `segment_speeds_mps`, `distance_m`, `corridor`, `reroutes` = the spliced route |
+| `transport_started` (`trs:<dispatch>`) | `hospital`, `hospital_station_id`, `predicted_eta_s`, `trip_s` | incident TRANSPORTING + `transport_started_at` + `hospital_station_id`; unit + dispatch TRANSPORTING |
+| `arrived_hospital` (`ahs:<dispatch>`) | `pos`, `hospital_station_id`, `travel_s`, `predicted_eta_s`, `trip_s` | incident, unit, dispatch AT_HOSPITAL (`at_hospital_at`) |
+| `handover_complete` (`hnd:<dispatch>`) | `handover_s`, `hospital_station_id`, `trip_s` | incident RESOLVED (MEDICAL) |
+| `returning` (`ret:<dispatch>`) | `cancelled`, `trip_s`, `pos` | unit + dispatch RETURNING |
+| `back_in_service` (`bis:<dispatch>`) | `end_reason` (CLEARED / CANCELLED), `trip_s`, `preempted_passed` | dispatch `ended_at`, `end_reason`, status COMPLETED; unit AVAILABLE (freed here, design section 1) |
+| `cancelled` (`cxl:<dispatch>`) | `reason`, `phase`, `leg_seq`, `trip_s` | incident CANCELLED |
+| `cancel_rejected` (`cxj:<dispatch>`) | `status`, `reason`, `phase` | incident status restored from CANCELLED to TRANSPORTING / AT_HOSPITAL / RESOLVED |
+| `failed` (`fail:<dispatch>`) | `reason`, `leg_seq`, `trip_s` | dispatch ended FAILED; incident FAILED + `failure_reason`; unit AVAILABLE |
+
+Any other `type` is a schema violation and goes to the DLQ (`BadEvent`).
 
 Dispatch and signal UUIDs appear without hyphens in event ids. Status updates only move
 forward (`_FORWARD_FROM`) and never leave a terminal status, and timestamps use

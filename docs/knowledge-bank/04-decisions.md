@@ -255,7 +255,7 @@ Redis is already required for live state.
 **Decision.**
 
 - `services/eta.py` defines the `EtaModel` protocol: a `name` plus `estimate(EtaQuery) -> EtaEstimate`.
-- The shipped `KinematicEtaModel` (`name = "kinematic-v1"`) integrates the remaining route with the same speed model the simulation uses (`services/speed_model.py` `build_profile`). It assumes every corridor junction ahead will be pre-empted.
+- The shipped `KinematicEtaModel` (`name = "kinematic-v3"` since stage 5B - non-emergency RETURN legs are replayed tick by tick against the fixed signal plans; `kinematic-v2` in stage 5A; `kinematic-v1` before) integrates the remaining route with the same speed model the simulation uses (`services/speed_model.py` `build_profile`). It assumes every corridor junction ahead will be pre-empted.
 - Congestion comes from the city-local hour of the simulation clock (`services/dispatch.py` `DispatchService.sim_clock`).
 - The model name is stored in `dispatches.eta_model`, and `predicted_eta_s` and `actual_travel_s` are kept so a future model can be trained.
 - The RandomForest was removed.

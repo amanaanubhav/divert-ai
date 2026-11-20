@@ -63,7 +63,7 @@ Code paths are under `backend/src/divert/` unless they start with `frontend/` or
 | **`EN_ROUTE`** | Vehicle and incident status after the worker starts the dispatch, until arrival. |
 | **Estimated time saved** | `est_time_saved_s` = junctions passed while `PREEMPTED` for the vehicle × the city's average junction delay. Always labelled an estimate. `SimulationEngine._arrive`. |
 | **ETA** | Estimated time of arrival, in simulated seconds. `predicted_eta_s` is fixed at dispatch; `eta_s` is refreshed every tick; `eta_at_claim_s` is the ETA to a junction when it was claimed. |
-| **`EtaModel` / `KinematicEtaModel`** | The ETA interface (a `Protocol`) and its shipped implementation `kinematic-v1`, which integrates the speed model's envelope assuming every corridor junction is pre-empted. `services/eta.py`. |
+| **`EtaModel` / `KinematicEtaModel`** | The ETA interface (a `Protocol`) and its shipped implementation `kinematic-v3`: emergency legs integrate the speed envelope assuming every corridor junction is pre-empted; RETURN legs are replayed tick by tick against the fixed signal plans. `services/eta.py`. |
 | **ETA MAPE** | Mean absolute percentage error of predicted vs actual travel time, `avg(abs(actual − predicted) / actual)`, reported as `dispatches.eta_mape` in the analytics summary (`db/repositories/analytics.py` `summary`). |
 | **`event_id`** | The deterministic id of a history event (max 64 characters), used as the idempotency key in PostgreSQL. See [event_id formats](#history-event_id). |
 
