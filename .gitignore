@@ -1,6 +1,8 @@
 # General
 .DS_Store
 .env
+.env.*
+!.env.example
 *.log
 
 # Node.js
@@ -16,12 +18,17 @@
 **/*$py.class
 **/.venv/
 **/venv/
-**/env/
-**/ENV/
 .pytest_cache/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
 
-# Docker
+# Docker / data volumes
 .docker/
+db/data/
+infra/osrm/data/
 
 # IDEs
 .vscode/
@@ -29,6 +36,5 @@
 *.swp
 *.swo
 
-# Project Specific
-db/data/
-C:/Users/amana/.gemini/antigravity/brain/*
+# Local work notes, caches and progress (never committed)
+.work/

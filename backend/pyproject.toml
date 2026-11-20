@@ -1,0 +1,102 @@
+[project]
+name = "divert"
+version = "2.0.0"
+description = "DIVERT - real-time emergency-vehicle traffic-signal preemption platform"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.7",
+    "redis>=5.2",
+    "httpx>=0.28",
+    "prometheus-client>=0.21",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "geoalchemy2>=0.16",
+    "alembic>=1.14",
+    # zoneinfo needs an IANA database; Windows and slim images have none.
+    "tzdata>=2024.2",
+]
+
+[project.scripts]
+divert = "divert.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "fakeredis>=2.26",
+    "respx>=0.22",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "asyncpg-stubs>=0.30",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/divert"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF", "N", "C4", "PT", "RET", "TID", "S", "DTZ", "PL"]
+ignore = [
+    "B008",     # FastAPI Depends() in defaults
+    "PLR0913",  # explicit keyword-heavy constructors are fine
+    "PLR2004",  # magic numbers are domain constants in tests/geo
+    "S101",     # assert in tests
+    "N818",     # domain exceptions read better without an Error suffix (NotFound, BadEvent)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/divert/migrations/versions/*.py" = ["E501"]
+"tests/**/*.py" = ["S", "PLR"]
+"tests/integration/*.py" = ["S", "PLR", "E501"]  # inline SQL literals
+"scripts/*.py" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["divert"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["divert"]
+exclude = ["src/divert/migrations/versions/"]
+
+[[tool.mypy.overrides]]
+module = ["fakeredis.*", "respx.*", "geoalchemy2.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "-ra --strict-markers -m 'not network'"
+markers = [
+    "integration: needs real PostgreSQL/PostGIS + Redis (DIVERT_TEST_DATABASE_URL / DIVERT_TEST_REDIS_URL)",
+    "network: hits real public services (Overpass/OSRM); run with -m network",
+]
+filterwarnings = [
+    "error::pytest.PytestUnraisableExceptionWarning",
+    # starlette>=1.x TestClient (WebSocket tests only) nags about httpx -> httpx2
+    "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+]
