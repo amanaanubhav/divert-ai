@@ -29,6 +29,8 @@ const KNOWN_TYPES = new Set([
   'snapshot',
   'tick',
   'vehicle_added',
+  'leg_changed',
+  'route_replaced',
   'vehicle_removed',
   'incident_updated',
   'pong',

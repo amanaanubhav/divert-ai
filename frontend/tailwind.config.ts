@@ -35,6 +35,7 @@ export default {
         warn: { DEFAULT: token('warn'), subtle: token('warnSubtle') },
         bad: { DEFAULT: token('bad'), subtle: token('badSubtle') },
         info: { DEFAULT: token('info'), subtle: token('infoSubtle') },
+        transport: { DEFAULT: token('transport'), subtle: token('transportSubtle') },
         scrim: token('scrim'),
       },
       zIndex: Object.fromEntries(Object.entries(Z_INDEX).map(([k, v]) => [k, String(v)])),

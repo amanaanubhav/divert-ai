@@ -3,6 +3,8 @@ import {
   cssVariables,
   DARK,
   hexToChannels,
+  JUNCTION_PALETTE,
+  LEG_PALETTE,
   LIGHT,
   SERVICE_PALETTE,
   SIGNAL_PALETTE,
@@ -98,6 +100,8 @@ describe.each([
     ['warn badge', p.warn, p.warnSubtle],
     ['bad badge', p.bad, p.badSubtle],
     ['info badge', p.info, p.infoSubtle],
+    ['transport badge', p.transport, p.transportSubtle],
+    ['transport on surface', p.transport, p.surface],
     ['ok on surface', p.ok, p.surface],
     ['warn on surface', p.warn, p.surface],
     ['bad on surface', p.bad, p.surface],
@@ -139,6 +143,28 @@ describe('signal state colours', () => {
   it('labels on the marker are readable (white on pre-empted, dark on conflict)', () => {
     expect(contrast('#ffffff', SIGNAL_PALETTE.PREEMPTED)).toBeGreaterThanOrEqual(4.5)
     expect(contrast('#1f2328', SIGNAL_PALETTE.CONFLICT)).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+describe('trip-leg colours', () => {
+  it('the TRANSPORT violet carries a white patient badge and stands out on light surfaces', () => {
+    expect(contrast('#ffffff', LEG_PALETTE.TRANSPORT)).toBeGreaterThanOrEqual(4.5)
+    expect(contrast(LEG_PALETTE.TRANSPORT, LIGHT.surface)).toBeGreaterThanOrEqual(3)
+    expect(contrast(LEG_PALETTE.TRANSPORT, LIGHT.page)).toBeGreaterThanOrEqual(3)
+  })
+
+  it.each(VISIONS)(
+    'TRANSPORT stays apart from every service colour (RESPONSE legs) and RETURN with %s vision',
+    (_v, m) => {
+      for (const s of Object.values(SERVICE_PALETTE))
+        expect(minDeltaE([LEG_PALETTE.TRANSPORT, s], m)).toBeGreaterThanOrEqual(20)
+      expect(minDeltaE([LEG_PALETTE.TRANSPORT, LEG_PALETTE.RETURN], m)).toBeGreaterThanOrEqual(20)
+    },
+  )
+
+  it('junction states reuse the three tested signal colours (shape is the first cue)', () => {
+    const used = new Set(Object.values(JUNCTION_PALETTE))
+    expect([...used].sort()).toEqual(Object.values(SIGNAL_PALETTE).sort())
   })
 })
 

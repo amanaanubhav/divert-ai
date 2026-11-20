@@ -186,6 +186,10 @@ export function describeError(err: unknown): string {
       }
       case 'network_error':
         return err.message
+      case 'cannot_cancel_transport':
+        return 'A patient is on board: a transport cannot be cancelled. The unit continues to the hospital.'
+      case 'invalid_state':
+        return 'This incident can no longer be cancelled (it has failed).'
       default:
         return err.message || `Request failed (${err.status})`
     }

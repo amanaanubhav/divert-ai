@@ -1,5 +1,5 @@
 import type { Incident, IncidentStatus } from '../../api/types'
-import { ACTIVE_STATUSES } from '../../api/types'
+import { ACTIVE_STATUSES, TRANSPORT_STATUSES } from '../../api/types'
 import type { LiveIncidentStatus } from '../../store/live'
 
 const RANK: Readonly<Record<IncidentStatus, number>> = {
@@ -7,9 +7,11 @@ const RANK: Readonly<Record<IncidentStatus, number>> = {
   DISPATCHED: 1,
   EN_ROUTE: 2,
   ON_SCENE: 3,
-  RESOLVED: 4,
-  CANCELLED: 4,
-  FAILED: 4,
+  TRANSPORTING: 4,
+  AT_HOSPITAL: 5,
+  RESOLVED: 6,
+  CANCELLED: 6,
+  FAILED: 6,
 }
 
 /** Statuses only move forward; the most advanced of REST and live wins. */
@@ -25,11 +27,21 @@ export function withLiveStatus(
   return incidents.map((inc) => {
     const l = live[inc.id]
     if (!l) return inc
-    const status = laterStatus(inc.status, l.status)
+    // A cancel the worker refused (patient already on board) restores the real status.
+    const status = l.reason?.startsWith('cancel refused')
+      ? l.status
+      : laterStatus(inc.status, l.status)
     return status === inc.status ? inc : { ...inc, status }
   })
 }
 
 export function isActive(status: IncidentStatus): boolean {
   return ACTIVE_STATUSES.includes(status)
+}
+
+export const CANCEL_BLOCKED_HINT = 'A patient is on board: a transport cannot be cancelled.'
+
+/** Cancel is refused (409 `cannot_cancel_transport`) once the patient is on board. */
+export function canCancel(status: IncidentStatus): boolean {
+  return isActive(status) && !TRANSPORT_STATUSES.includes(status)
 }

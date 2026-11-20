@@ -24,6 +24,23 @@ describe('live status merge', () => {
     expect(isActive('ON_SCENE')).toBe(true)
     expect(isActive('FAILED')).toBe(false)
   })
+
+  it('orders the transport statuses and lets a refused cancel restore the real status', () => {
+    expect(laterStatus('ON_SCENE', 'TRANSPORTING')).toBe('TRANSPORTING')
+    expect(laterStatus('AT_HOSPITAL', 'TRANSPORTING')).toBe('AT_HOSPITAL')
+    expect(laterStatus('AT_HOSPITAL', 'RESOLVED')).toBe('RESOLVED')
+    expect(isActive('TRANSPORTING')).toBe(true)
+    expect(isActive('AT_HOSPITAL')).toBe(true)
+    const [out] = withLiveStatus([incident({ id: 'a', status: 'CANCELLED' })], {
+      a: {
+        status: 'TRANSPORTING',
+        ts: 'x',
+        vehicle_id: null,
+        reason: 'cancel refused: patient on board',
+      },
+    })
+    expect(out?.status).toBe('TRANSPORTING')
+  })
 })
 
 describe('hash routing', () => {

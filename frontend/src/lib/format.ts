@@ -1,4 +1,16 @@
-import type { IncidentStatus, IncidentType, ServiceType } from '../api/types'
+import type {
+  DestinationKind,
+  DispatchStatus,
+  IncidentStatus,
+  IncidentType,
+  JunctionState,
+  LegEndReason,
+  LegKind,
+  Movement,
+  PreemptOutcome,
+  ServiceType,
+  UnitPhase,
+} from '../api/types'
 
 export function formatDistance(m: number | null | undefined): string {
   if (m == null || !Number.isFinite(m)) return '–'
@@ -95,6 +107,8 @@ export const STATUS_LABEL: Readonly<Record<IncidentStatus, string>> = {
   DISPATCHED: 'Dispatched',
   EN_ROUTE: 'En route',
   ON_SCENE: 'On scene',
+  TRANSPORTING: 'Transporting',
+  AT_HOSPITAL: 'At hospital',
   RESOLVED: 'Resolved',
   CANCELLED: 'Cancelled',
   FAILED: 'Failed',
@@ -108,4 +122,105 @@ export function secondsBetween(
   if (!a || !b) return null
   const d = (new Date(b).getTime() - new Date(a).getTime()) / 1000
   return Number.isFinite(d) ? d : null
+}
+
+/** `+2.2%` / `-0.5%` from a percentage value (not a fraction). */
+export function formatSignedPct(pct: number | null | undefined, digits = 1): string {
+  if (pct == null || !Number.isFinite(pct)) return '–'
+  const r = Number(pct.toFixed(digits))
+  return `${r > 0 ? '+' : ''}${r.toFixed(digits)}%`
+}
+
+/** Hospital label with its OSM emergency-department tag. */
+export function hospitalLabel(h: {
+  name: string | null
+  id?: string
+  station_id?: string
+}): string {
+  return h.name ?? h.id ?? h.station_id ?? 'unnamed hospital'
+}
+
+/** `yes` -> "Emergency department", `no` -> "No emergency department", null -> "ED not tagged". */
+export function edLabel(tag: string | null | undefined): string {
+  if (tag === 'yes') return 'Emergency department'
+  if (tag === 'no') return 'No emergency department'
+  return 'ED not tagged in OSM'
+}
+
+/** Unit status while on a dispatch (the phase chip). */
+export const PHASE_LABEL: Readonly<Record<UnitPhase, string>> = {
+  DISPATCHED: 'Responding',
+  ON_SCENE: 'On scene',
+  TRANSPORTING: 'Transporting',
+  AT_HOSPITAL: 'At hospital',
+  RETURNING: 'Returning',
+}
+
+export const DISPATCH_STATUS_LABEL: Readonly<Record<DispatchStatus, string>> = {
+  ...PHASE_LABEL,
+  COMPLETED: 'Completed',
+  FAILED: 'Failed',
+}
+
+export const LEG_LABEL: Readonly<Record<LegKind, string>> = {
+  RESPONSE: 'Response',
+  TRANSPORT: 'Transport',
+  RETURN: 'Return',
+}
+
+export const DEST_KIND_LABEL: Readonly<Record<DestinationKind, string>> = {
+  SCENE: 'scene',
+  HOSPITAL: 'hospital',
+  STATION: 'station',
+}
+
+export const LEG_END_LABEL: Readonly<Record<LegEndReason, string>> = {
+  ARRIVED: 'Arrived',
+  CANCELLED: 'Cancelled',
+  FAILED: 'Failed',
+  SUPERSEDED: 'Not driven (superseded)',
+}
+
+export const MOVEMENT_LABEL: Readonly<Record<Movement, string>> = {
+  STRAIGHT: 'Straight on',
+  SLIGHT_LEFT: 'Slight left',
+  LEFT: 'Left',
+  SHARP_LEFT: 'Sharp left',
+  SLIGHT_RIGHT: 'Slight right',
+  RIGHT: 'Right',
+  SHARP_RIGHT: 'Sharp right',
+  U_TURN: 'U-turn',
+  ROUNDABOUT: 'Roundabout',
+}
+
+/** Junction states (design 4.3) as operators read them. */
+export const JUNCTION_STATE_LABEL: Readonly<Record<JunctionState, string>> = {
+  NORMAL: 'Normal',
+  TRANSITIONING: 'Transitioning',
+  PREEMPTED: 'Pre-empted',
+  QUEUED: 'Queued',
+  RECOVERING: 'Recovering',
+}
+
+export const JUNCTION_STATE_HINT: Readonly<Record<JunctionState, string>> = {
+  NORMAL: 'running its fixed plan',
+  TRANSITIONING: 'clearing the current phase towards green for the vehicle',
+  PREEMPTED: 'green held for the vehicle',
+  QUEUED: 'green held; another vehicle waits for its turn',
+  RECOVERING: 'released; returning to its plan',
+}
+
+export const OUTCOME_LABEL: Readonly<Record<PreemptOutcome, string>> = {
+  CLEARED: 'Cleared',
+  TIMEOUT: 'Timed out',
+  CANCELLED: 'Cancelled',
+  REROUTED: 'Re-routed',
+}
+
+/** Conflict priority rank (design 4.4). */
+export const RANK_LABEL: Readonly<Record<number, string>> = {
+  0: 'ambulance with patient',
+  1: 'ambulance',
+  2: 'fire engine',
+  3: 'police',
 }

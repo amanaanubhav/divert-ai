@@ -44,6 +44,9 @@ export interface UiPalette {
   badSubtle: string
   info: string
   infoSubtle: string
+  /** Patient transport (TRANSPORT leg, at hospital): chip text and its subtle background. */
+  transport: string
+  transportSubtle: string
   /** Modal backdrop (used with opacity). */
   scrim: string
 }
@@ -70,6 +73,8 @@ export const LIGHT: UiPalette = {
   badSubtle: '#fbe9e7',
   info: '#1f4e79',
   infoSubtle: '#e7eef6',
+  transport: '#5b2ca6',
+  transportSubtle: '#f1ecfa',
   scrim: '#1f2328',
 }
 
@@ -96,6 +101,8 @@ export const DARK: UiPalette = {
   badSubtle: '#3a2120',
   info: '#8ab4e0',
   infoSubtle: '#1f2d3d',
+  transport: '#b9a3ee',
+  transportSubtle: '#2a2438',
   scrim: '#000000',
 }
 
@@ -111,11 +118,37 @@ export const SERVICE_PALETTE = {
   POLICE: '#3d4451',
 } as const
 
-/** Junction states on the map. CONFLICT also uses a diamond marker, not colour alone. */
+/**
+ * Signal colours on the map. Three colours only; the five junction states (design 4.3) differ
+ * by shape and fill first (`JUNCTION_PALETTE`, index.css): transitioning = hollow green ring,
+ * pre-empted = solid green dot, queued = amber diamond, recovering = hollow grey ring.
+ * CONFLICT is the per-claim label of a queued claimant.
+ */
 export const SIGNAL_PALETTE = {
   NORMAL: '#6e7781',
   PREEMPTED: '#1a7f37',
   CONFLICT: '#bf8700',
+} as const
+
+/** Colour of each junction state (shape is the first cue, see SIGNAL_PALETTE). */
+export const JUNCTION_PALETTE = {
+  NORMAL: SIGNAL_PALETTE.NORMAL,
+  TRANSITIONING: SIGNAL_PALETTE.PREEMPTED,
+  PREEMPTED: SIGNAL_PALETTE.PREEMPTED,
+  QUEUED: SIGNAL_PALETTE.CONFLICT,
+  RECOVERING: SIGNAL_PALETTE.NORMAL,
+} as const
+
+/**
+ * Trip legs on the map (design section 6). RESPONSE uses the service colour. TRANSPORT is a
+ * solid violet (with a patient badge on the vehicle and the destination hospital highlighted):
+ * it stays >= 20 CIE76 ΔE from every service colour, so from the ambulance blue too, under
+ * normal, protan, deutan and tritan vision (palette.test.ts). RETURN is a dashed grey: the
+ * dash, not the colour, says "not an emergency".
+ */
+export const LEG_PALETTE = {
+  TRANSPORT: '#6c35c2',
+  RETURN: '#6e7781',
 } as const
 
 /** Other map ink (same in light and dark: map overlays sit on the tiles, not on the chrome). */
@@ -131,6 +164,7 @@ export function mapVariables(): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(SIGNAL_PALETTE)) out[`--map-${k.toLowerCase()}`] = v
   for (const [k, v] of Object.entries(MAP_PALETTE)) out[`--map-${k}`] = v
+  for (const [k, v] of Object.entries(LEG_PALETTE)) out[`--map-${k.toLowerCase()}`] = v
   return out
 }
 

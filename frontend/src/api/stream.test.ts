@@ -77,6 +77,13 @@ describe('parseMessage', () => {
     expect(parseMessage('not json')).toBeNull()
     expect(parseMessage(42)).toBeNull()
   })
+
+  it('accepts the trip-leg messages (leg_changed, route_replaced)', () => {
+    expect(parseMessage(JSON.stringify({ type: 'leg_changed', v: 1 }))?.type).toBe('leg_changed')
+    expect(parseMessage(JSON.stringify({ type: 'route_replaced', v: 1 }))?.type).toBe(
+      'route_replaced',
+    )
+  })
 })
 
 describe('backoffDelay', () => {
