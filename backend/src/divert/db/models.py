@@ -22,9 +22,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from divert.db.base import Base, str_enum, utc_now_column
 from divert.domain.enums import (
+    DestinationKind,
+    DispatchStatus,
     IncidentStatus,
     IncidentType,
     Lane,
+    LegEndReason,
+    LegKind,
+    Movement,
+    PhaseStateAtClaim,
+    PreemptOutcome,
     ServiceType,
     SignalState,
     UnitStatus,
@@ -73,12 +80,17 @@ class Station(Base):
     osm_id: Mapped[int] = mapped_column(sa.BigInteger)
     geom: Mapped[Any] = mapped_column(POINT)
     active: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.true())
+    # hospitals (AMBULANCE bases) only: OSM emergency=yes|no (NULL = not tagged) and the
+    # healthcare=* tag - hospital selection skips emergency=no and non-acute facilities
+    emergency: Mapped[str | None] = mapped_column(sa.String(3))
+    healthcare: Mapped[str | None] = mapped_column(sa.String(32))
     created_at: Mapped[datetime] = utc_now_column()
     updated_at: Mapped[datetime] = utc_now_column(onupdate=True)
 
     __table_args__ = (
         sa.UniqueConstraint("osm_type", "osm_id"),
         sa.CheckConstraint("osm_type IN ('node', 'way', 'relation')", name="osm_type"),
+        sa.CheckConstraint("emergency IN ('yes', 'no')", name="emergency"),
         sa.Index("ix_stations_geom", "geom", postgresql_using="gist"),
         sa.Index("ix_stations_city_service", "city_id", "service"),
     )
@@ -114,7 +126,8 @@ class Unit(Base):
         sa.UniqueConstraint("station_id", "ordinal"),
         sa.CheckConstraint("ordinal >= 1", name="ordinal"),
         sa.CheckConstraint(
-            "(status IN ('DISPATCHED', 'ON_SCENE')) = (current_dispatch_id IS NOT NULL)",
+            "(status IN ('DISPATCHED', 'ON_SCENE', 'TRANSPORTING', 'AT_HOSPITAL', 'RETURNING'))"
+            " = (current_dispatch_id IS NOT NULL)",
             name="busy_has_dispatch",
         ),
         sa.Index(
@@ -171,6 +184,12 @@ class Incident(Base):
     cancelled_at: Mapped[datetime | None] = mapped_column(TSTZ)
     failed_at: Mapped[datetime | None] = mapped_column(TSTZ)
     failure_reason: Mapped[str | None] = mapped_column(sa.Text)
+    # MEDICAL: the hospital the patient was taken to (design §1.1) and when
+    hospital_station_id: Mapped[str | None] = mapped_column(
+        sa.ForeignKey("stations.id", ondelete="RESTRICT")
+    )
+    transport_started_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    at_hospital_at: Mapped[datetime | None] = mapped_column(TSTZ)
     updated_at: Mapped[datetime] = utc_now_column(onupdate=True)
 
     __table_args__ = (
@@ -184,7 +203,9 @@ class Incident(Base):
 
 
 class Dispatch(Base):
-    """One vehicle sent to one incident, with its route and corridor snapshot."""
+    """One vehicle sent to one incident: the whole trip (design §5) until the unit is back
+    in service. ``route`` / ``predicted_eta_s`` / ``corridor`` / ``actual_travel_s`` are
+    the RESPONSE leg (kept for compatibility); every leg is in ``dispatch_legs``."""
 
     __tablename__ = "dispatches"
 
@@ -198,6 +219,9 @@ class Dispatch(Base):
     station_id: Mapped[str] = mapped_column(sa.ForeignKey("stations.id", ondelete="RESTRICT"))
     city_id: Mapped[str] = mapped_column(sa.ForeignKey("cities.id", ondelete="RESTRICT"))
     service: Mapped[ServiceType] = mapped_column(str_enum(ServiceType, "service"))
+    status: Mapped[DispatchStatus] = mapped_column(
+        str_enum(DispatchStatus, "status"), server_default=DispatchStatus.DISPATCHED.value
+    )
     route: Mapped[Any] = mapped_column(LINESTRING)
     distance_m: Mapped[float] = mapped_column(sa.Double)
     predicted_eta_s: Mapped[float] = mapped_column(sa.Double)
@@ -211,7 +235,7 @@ class Dispatch(Base):
     eta_model: Mapped[str | None] = mapped_column(sa.String(32))
     dispatched_at: Mapped[datetime] = utc_now_column()
     arrived_at: Mapped[datetime | None] = mapped_column(TSTZ)
-    ended_at: Mapped[datetime | None] = mapped_column(TSTZ)  # cleared / cancelled / failed
+    ended_at: Mapped[datetime | None] = mapped_column(TSTZ)  # back in service / failed
     end_reason: Mapped[str | None] = mapped_column(sa.String(16))
 
     __table_args__ = (
@@ -238,7 +262,61 @@ class Dispatch(Base):
     )
 
 
+class DispatchLeg(Base):
+    """One leg of a dispatch (design §1, §5): RESPONSE (seq 0, written with the dispatch),
+    then TRANSPORT and/or RETURN, written by the LegPlanner together with the outbox row
+    that carries the ``leg_planned`` command. Times: ``started_trip_s`` / ``ended_trip_s``
+    are simulated seconds since the dispatch started (wall timestamps run slower than the
+    simulation when DIVERT_SIM_TIME_SCALE > 1)."""
+
+    __tablename__ = "dispatch_legs"
+
+    id: Mapped[int] = mapped_column(sa.BigInteger, sa.Identity(), primary_key=True)
+    dispatch_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("dispatches.id", ondelete="CASCADE")
+    )
+    seq: Mapped[int] = mapped_column(sa.SmallInteger)
+    kind: Mapped[LegKind] = mapped_column(str_enum(LegKind, "kind"))
+    emergency: Mapped[bool] = mapped_column(sa.Boolean)
+    origin: Mapped[Any] = mapped_column(POINT)
+    destination: Mapped[Any] = mapped_column(POINT)
+    destination_kind: Mapped[DestinationKind] = mapped_column(
+        str_enum(DestinationKind, "destination_kind")
+    )
+    destination_station_id: Mapped[str | None] = mapped_column(
+        sa.ForeignKey("stations.id", ondelete="RESTRICT")
+    )
+    route: Mapped[Any] = mapped_column(LINESTRING)
+    distance_m: Mapped[float] = mapped_column(sa.Double)
+    predicted_eta_s: Mapped[float] = mapped_column(sa.Double)
+    segment_speeds_mps: Mapped[list[float]] = mapped_column(
+        ARRAY(sa.Double), server_default=sa.text("'{}'")
+    )
+    corridor: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=sa.text("'[]'"))
+    route_choice: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    hospital_choice: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    eta_model: Mapped[str | None] = mapped_column(sa.String(32))
+    planned_at: Mapped[datetime] = mapped_column(TSTZ)
+    started_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    ended_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    actual_travel_s: Mapped[float | None] = mapped_column(sa.Double)
+    end_reason: Mapped[LegEndReason | None] = mapped_column(str_enum(LegEndReason, "end_reason"))
+    reroutes: Mapped[int] = mapped_column(sa.SmallInteger, server_default=sa.text("0"))
+    started_trip_s: Mapped[float | None] = mapped_column(sa.Double)
+    ended_trip_s: Mapped[float | None] = mapped_column(sa.Double)
+
+    __table_args__ = (
+        sa.UniqueConstraint("dispatch_id", "seq"),
+        sa.CheckConstraint("seq >= 0", name="seq"),
+        sa.CheckConstraint("distance_m >= 0 AND predicted_eta_s >= 0", name="non_negative"),
+        sa.Index("ix_dispatch_legs_route", "route", postgresql_using="gist"),
+        sa.Index("ix_dispatch_legs_destination_station", "destination_station_id"),
+    )
+
+
 class SignalPreemption(Base):
+    """One claim of one junction pass by one vehicle (design §4.6)."""
+
     __tablename__ = "signal_preemptions"
 
     id: Mapped[int] = mapped_column(sa.BigInteger, sa.Identity(), primary_key=True)
@@ -254,6 +332,21 @@ class SignalPreemption(Base):
     eta_at_claim_s: Mapped[float | None] = mapped_column(sa.Double)
     claimed_at: Mapped[datetime] = mapped_column(TSTZ)
     released_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    leg_seq: Mapped[int] = mapped_column(sa.SmallInteger, server_default=sa.text("0"))
+    movement: Mapped[Movement | None] = mapped_column(str_enum(Movement, "movement"))
+    lane_index: Mapped[int | None] = mapped_column(sa.SmallInteger)
+    lanes_total: Mapped[int | None] = mapped_column(sa.SmallInteger)
+    free_left: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.false())
+    required_lead_s: Mapped[float | None] = mapped_column(sa.Double)
+    transition_s: Mapped[float | None] = mapped_column(sa.Double)
+    queue_clear_s: Mapped[float | None] = mapped_column(sa.Double)
+    green_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    crossed_at: Mapped[datetime | None] = mapped_column(TSTZ)
+    waited_s: Mapped[float | None] = mapped_column(sa.Double)
+    outcome: Mapped[PreemptOutcome | None] = mapped_column(str_enum(PreemptOutcome, "outcome"))
+    phase_state_at_claim: Mapped[PhaseStateAtClaim | None] = mapped_column(
+        str_enum(PhaseStateAtClaim, "phase_state_at_claim")
+    )
 
     __table_args__ = (
         sa.CheckConstraint("state <> 'NORMAL'", name="not_normal"),
@@ -296,9 +389,10 @@ class VehiclePosition(Base):
     geom: Mapped[Any] = mapped_column(POINT)
     speed_mps: Mapped[float] = mapped_column(sa.Double)
     along_m: Mapped[float] = mapped_column(sa.Double)
-    # simulated seconds since dispatch (ts is wall clock; sim time can run faster and is
-    # frozen while no worker leads) - the worker rebuilds elapsed time from this
+    # simulated seconds since the LEG started (ts is wall clock; sim time can run faster
+    # and is frozen while no worker leads) - the worker rebuilds elapsed time from this
     elapsed_s: Mapped[float | None] = mapped_column(sa.Double)
+    leg_seq: Mapped[int] = mapped_column(sa.SmallInteger, server_default=sa.text("0"))
 
     __table_args__ = (sa.Index("ix_vehicle_positions_ts_brin", "ts", postgresql_using="brin"),)
 
