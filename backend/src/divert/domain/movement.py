@@ -5,6 +5,16 @@ along-position and the exit bearing the chord over the 30 m after it. If an OSRM
 intersection lies within 15 m of the junction, its ``bearings[in]`` (reversed) and
 ``bearings[out]`` are used instead, and its bearing count is the junction's leg count.
 
+Signal clusters: a junction of the snapshot is often several OSM signal nodes merged
+(single linkage, 40 m) - a dual-carriageway crossing is 2-4 OSRM intersections, and the
+route turns across them, not at one. The route's *junction span* on this pass runs from
+the first to the last of: its vertices that are member nodes of the cluster (OSRM's
+``nodes`` annotation) and the OSRM intersections within 15 m of the junction. The
+approach is the first span intersection's ``in`` (reversed), the exit the last one's
+``out``; the leg count and road bearings come from the span intersection with the most
+roads (ties: the first, where the vehicle enters). Without node ids the span is the
+intersections within 15 m.
+
 Turn angle ``delta = normalise(exit - approach)`` in (-180, 180]; negative = left (bearings
 run clockwise). Thresholds on ``|delta|``: <= 20 STRAIGHT, <= 45 SLIGHT, <= 135 LEFT/RIGHT,
 < 170 SHARP, >= 170 U_TURN.
@@ -25,6 +35,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Final
 
@@ -49,6 +60,10 @@ U_TURN_MIN_DEG: Final = 170.0
 BEARING_WINDOW_M: Final = 30.0  # approach / exit chords
 INTERSECTION_SNAP_M: Final = 15.0  # an OSRM intersection this close is the junction
 INTERSECTION_ALONG_M: Final = 50.0  # ...and on this pass of the route (multi-pass)
+# cluster member nodes of this pass: within half the corridor's minimum gap between two
+# passes (corridor.MIN_REPASS_M = 200 m) of the junction's along-position
+CLUSTER_ALONG_M: Final = 100.0
+SPAN_EPS_M: Final = 0.5  # intersections sit on vertices; float slack only
 MANEUVER_WINDOW_M: Final = 40.0  # a step maneuver this close (along the route) belongs here
 MIN_CHORD_M: Final = 1.0  # shorter chords have no meaningful bearing
 MIN_JUNCTION_LEGS: Final = 2  # OSRM's depart / arrive intersections list one road only
@@ -160,17 +175,40 @@ def approach_speed_mps(route: Route, along_m: float) -> float:
     return speeds[i]
 
 
-def nearest_intersection(route: Route, along_m: float, pos: LatLng) -> Intersection | None:
-    best: Intersection | None = None
-    for it in route.intersections:
-        if it.legs < MIN_JUNCTION_LEGS:  # depart / arrive points, not junctions
-            continue
-        gap = abs(it.along_m - along_m)
-        if gap > INTERSECTION_ALONG_M or haversine_m(it.location, pos) > INTERSECTION_SNAP_M:
-            continue
-        if best is None or gap < abs(best.along_m - along_m):
-            best = it
-    return best
+def _junction_roads(route: Route) -> list[Intersection]:
+    # depart / arrive points list one road only: not junctions
+    return [it for it in route.intersections if it.legs >= MIN_JUNCTION_LEGS]
+
+
+def member_alongs(route: Route, along_m: float, members: Collection[int]) -> list[float]:
+    """Along-positions of this pass's vertices that are member nodes of the junction."""
+    if not members or not route.node_ids:
+        return []
+    cum = route.cumulative
+    return [
+        cum[i]
+        for i, node in enumerate(route.node_ids)
+        if node in members and abs(cum[i] - along_m) <= CLUSTER_ALONG_M
+    ]
+
+
+def junction_span(
+    route: Route, along_m: float, pos: LatLng, members: Collection[int] = ()
+) -> list[Intersection]:
+    """The OSRM intersections the route crosses inside the junction on this pass, in
+    route order (see module doc); empty when OSRM saw none there."""
+    roads = _junction_roads(route)
+    near = [
+        it.along_m
+        for it in roads
+        if abs(it.along_m - along_m) <= INTERSECTION_ALONG_M
+        and haversine_m(it.location, pos) <= INTERSECTION_SNAP_M
+    ]
+    marks = near + member_alongs(route, along_m, members)
+    if not marks:
+        return []
+    lo, hi = min(marks) - SPAN_EPS_M, max(marks) + SPAN_EPS_M
+    return [it for it in roads if lo <= it.along_m <= hi]
 
 
 def nearest_maneuver(route: Route, along_m: float) -> Maneuver | None:
@@ -219,17 +257,30 @@ class JunctionMovement:
     geometry_movement: Movement = Movement.STRAIGHT
 
 
+def span_bearings(
+    span: Collection[Intersection], approach: float, exit_: float | None
+) -> tuple[float, float | None]:
+    """(approach, exit) across a junction span: the first ``in`` and the last ``out``
+    OSRM knows of (the geometry chords where it knows neither)."""
+    ins = [it.approach_bearing for it in span if it.approach_bearing is not None]
+    outs = [it.exit_bearing for it in span if it.exit_bearing is not None]
+    return (ins[0] if ins else approach), (outs[-1] if outs else exit_)
+
+
 def junction_movement(
-    route: Route, along_m: float, pos: LatLng, offset_m: float
+    route: Route,
+    along_m: float,
+    pos: LatLng,
+    offset_m: float,
+    *,
+    members: Collection[int] = (),
 ) -> JunctionMovement:
-    """The movement at one junction of a route (see module doc)."""
-    inter = nearest_intersection(route, along_m, pos)
-    geo_approach, geo_exit = geometry_bearings(route, along_m)
-    approach = geo_approach
-    exit_ = geo_exit
-    if inter is not None:
-        approach = inter.approach_bearing if inter.approach_bearing is not None else approach
-        exit_ = inter.exit_bearing if inter.exit_bearing is not None else exit_
+    """The movement at one junction of a route (see module doc); ``members`` are the OSM
+    node ids of the junction's signal cluster."""
+    span = junction_span(route, along_m, pos, members)
+    approach, exit_ = span_bearings(span, *geometry_bearings(route, along_m))
+    # leg count / road bearings: the span node with the most roads (ties: the entry)
+    inter = max(span, key=lambda it: it.legs) if span else None
     delta = 0.0 if exit_ is None else bearing_delta_deg(approach, exit_)
     geometry = classify_turn(delta)
     movement = geometry

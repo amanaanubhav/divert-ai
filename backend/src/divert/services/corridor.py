@@ -70,7 +70,9 @@ def build_corridor(
         found.extend((cand, k, proj) for k, proj in enumerate(passes))
     found.sort(key=lambda f: (f[2].along_m, f[0].signal.id, f[1]))
     moves = [
-        junction_movement(route, proj.along_m, cand.signal.pos, proj.offset_m)
+        junction_movement(
+            route, proj.along_m, cand.signal.pos, proj.offset_m, members=cand.signal.osm_node_ids
+        )
         for cand, _, proj in found
     ]
     advice = plan_lanes(

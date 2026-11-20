@@ -11,7 +11,11 @@ constants are documented defaults, not measurements (see "Calibration"). The con
 
 ## 1. Route candidates
 
-`GET {DIVERT_OSRM_URL}/route/v1/driving/{lng},{lat};{lng},{lat}?overview=full&geometries=geojson&steps=true&annotations=distance,duration,speed&alternatives=3`
+`GET {DIVERT_OSRM_URL}/route/v1/driving/{lng},{lat};{lng},{lat}?overview=full&geometries=geojson&steps=true&annotations=distance,duration,speed,nodes&alternatives=3`
+
+(`nodes`: the OSM node id of every vertex, used to find a signal cluster's member nodes on
+the route. A zero-length answer, with origin and destination snapped to the same road point,
+is a routing error of kind `same_point`.)
 
 * httpx timeout `DIVERT_OSRM_TIMEOUT_S` (connect <= 3 s); retries `DIVERT_OSRM_RETRIES` on
   transport errors and HTTP 429/5xx with exponential backoff + jitter; `NoRoute` / 4xx are
@@ -52,9 +56,15 @@ per pass** (runs of segments within the buffer; runs < 200 m apart are one pass)
 route through a junction twice has entries `J` (pass 0) and `J#1` (pass 1).
 
 **Movement** (`domain/movement.py`). Approach / exit bearings are the chords over the 30 m
-before / after the junction; an OSRM intersection within 15 m wins (`bearings[in] + 180`,
-`bearings[out]`) and gives the **leg count** (intersections listing one road are OSRM's
-depart / arrive points and are ignored; no intersection = unknown, 4 assumed). With
+before / after the junction; OSRM intersections in the **junction span** win and give the
+**leg count**. The span runs from the first to the last of the route's vertices that are
+member nodes of the junction's signal cluster (within 100 m along) and the OSRM
+intersections within 15 m. The approach is the first span intersection's
+`bearings[in] + 180` and the exit the last one's `bearings[out]`, because a dual
+carriageway crossing is 2-4 OSRM intersections and the turn spans them. The leg count and
+road bearings come from the span intersection with the most roads (ties: the entry).
+Intersections listing one road are OSRM's depart / arrive points and are ignored. With no
+intersection the leg count is unknown, and 4 is assumed. With
 `delta = normalise(exit - approach)` in (-180, 180], negative = left:
 
 | \|delta\| | movement |

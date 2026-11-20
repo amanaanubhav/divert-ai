@@ -1,10 +1,14 @@
 """OSRM routing client with a Redis cache, timeouts, retries and metrics.
 
 ``GET {DIVERT_OSRM_URL}/route/v1/driving/{lng,lat};{lng,lat}`` with ``overview=full
-geometries=geojson steps=true annotations=distance,duration,speed
+geometries=geojson steps=true annotations=distance,duration,speed,nodes
 alternatives=DIVERT_ROUTE_ALTERNATIVES``. Each returned route keeps its step maneuvers
-(type, modifier, roundabout exit, road name) and its OSRM intersections (road bearings,
-in/out) - the junction geometry movements and signal phases are built from.
+(type, modifier, roundabout exit, road name), its OSRM intersections (road bearings,
+in/out) - the junction geometry movements and signal phases are built from - and the OSM
+node id of every vertex (which vertices belong to a signal cluster).
+
+A zero-length answer (origin and destination snap to the same road point) raises
+:class:`RoutingError` with ``kind=SAME_POINT``.
 
 :meth:`OsrmRouter.alternatives` returns the candidates for crowd-aware route choice
 (design §2): OSRM's alternatives, plus up to DIVERT_ROUTE_DETOURS *via-point detours*
@@ -54,9 +58,13 @@ BASE_PARAMS: Final = {
     "overview": "full",
     "geometries": "geojson",
     "steps": "true",
-    "annotations": "distance,duration,speed",
+    # nodes: the OSM node id of every vertex - finds a signal cluster's member nodes
+    "annotations": "distance,duration,speed,nodes",
 }
 RETRYABLE_STATUS: Final = frozenset({429, 500, 502, 503, 504})
+# RoutingError.kind of a zero-length answer: origin and destination snap to the same road
+# point (e.g. a RETURN to a station mapped off the road, asked from its road point)
+SAME_POINT: Final = "same_point"
 MANEUVER_SNAP_M: Final = 250.0
 
 # via-point detours (design §2; assumptions)
@@ -175,11 +183,45 @@ def _locate_steps(
     return maneuvers, intersections
 
 
+def _leg_node_ids(legs: Sequence[dict[str, Any]], n_points: int) -> list[int]:
+    """OSM node id per geometry vertex (``annotation.nodes``; legs share their via
+    vertex). A leg's first and last vertices are snapped points, not nodes - OSRM lists
+    a neighbouring node there - so they get 0 (unknown). Empty when OSRM sent no nodes or
+    the counts do not line up."""
+    ids: list[int] = []
+    for k, leg in enumerate(legs):
+        ann = leg.get("annotation") or {}
+        nodes = ann.get("nodes") or []
+        if not nodes or len(nodes) != len(ann.get("distance") or []) + 1:
+            return []
+        own = [0, *(int(n) for n in nodes[1:-1]), 0]
+        ids.extend(own if k == 0 else own[1:])
+    return ids if len(ids) == n_points else []
+
+
+def _merge_ids(points: Sequence[LatLng], ids: Sequence[int]) -> tuple[int, ...]:
+    """Node ids for the vertices :meth:`Route.build` keeps (a run of identical
+    consecutive points becomes one vertex: the first known id of the run)."""
+    if not ids:
+        return ()
+    out: list[int] = []
+    for i, (p, n) in enumerate(zip(points, ids, strict=True)):
+        if i and points[i - 1] == p:
+            out[-1] = out[-1] or n
+        else:
+            out.append(n)
+    return tuple(out)
+
+
 def _parse_one(r: dict[str, Any]) -> Route:
     coords = r.get("geometry", {}).get("coordinates") or []
     points = [LatLng(float(lat), float(lng)) for lng, lat in coords]
     if len(points) < 2:
         raise RoutingError("OSRM returned a degenerate route", kind="no_route")
+    if len(set(points)) < 2:  # a Route needs two distinct points
+        raise RoutingError(
+            "OSRM: origin and destination snap to the same road point", kind=SAME_POINT
+        )
     speeds: list[float] = []
     steps: list[dict[str, Any]] = []
     for leg in r.get("legs", []):
@@ -205,6 +247,7 @@ def _parse_one(r: dict[str, Any]) -> Route:
     route = Route.build(points, speeds, osrm_distance_m=distance, osrm_duration_s=duration)
     scale = route.length_m / distance if distance > 0 else 1.0
     maneuvers, intersections = _locate_steps(route.points, route.cumulative, steps, scale)
+    node_ids = _merge_ids(points, _leg_node_ids(r.get("legs", []), len(points)))
     return Route(
         points=route.points,
         cumulative=route.cumulative,
@@ -213,6 +256,7 @@ def _parse_one(r: dict[str, Any]) -> Route:
         osrm_distance_m=distance,
         osrm_duration_s=duration,
         intersections=tuple(intersections),
+        node_ids=node_ids if len(node_ids) == len(route.points) else (),
     )
 
 

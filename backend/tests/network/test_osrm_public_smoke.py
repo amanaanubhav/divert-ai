@@ -54,6 +54,9 @@ async def test_public_osrm_alternatives_are_scored(city_id: str) -> None:
         assert route.length_m == pytest.approx(route.osrm_distance_m, rel=0.05)
         assert len(route.segment_speeds_mps) == len(route.points) - 1
         assert route.intersections, "OSRM intersections are kept for the junction geometry"
+        # OSM node ids per vertex (signal clusters): one per point, real ids inside
+        assert len(route.node_ids) == len(route.points)
+        assert sum(1 for n in route.node_ids if n) >= len(route.points) // 2
         near = []
         for sig in snap.signals:  # brute force, like ST_DWithin
             proj = project_onto_polyline(sig.pos, route.points, route.cumulative)

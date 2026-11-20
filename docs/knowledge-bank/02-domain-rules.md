@@ -79,8 +79,8 @@ Fleet: OSM has no fleet data, so the seed gives every active station `DIVERT_UNI
 | Field | Rule | Code |
 |---|---|---|
 | `along_m`, `offset_m` | projection onto the polyline (cumulative haversine) | `project_passes` |
-| `approach_bearing`, `exit_bearing`, `turn_deg` | chords over the 30 m before / after; an OSRM intersection within 15 m (and 50 m along) wins with `bearings[in] + 180` / `bearings[out]` | `junction_movement` in `backend/src/divert/domain/movement.py` |
-| `legs`, `junction_bearings` | that intersection's road count and bearings (intersections with < 2 roads are OSRM's depart/arrive points and are ignored); `null` = unknown (4 assumed) | same |
+| `approach_bearing`, `exit_bearing`, `turn_deg` | chords over the 30 m before / after. OSRM intersections in the **junction span** win: first `bearings[in] + 180`, last `bearings[out]`. The span runs from the first to the last of the route's vertices that are member nodes of the signal cluster (OSRM `nodes` annotation, within 100 m along) and the OSRM intersections within 15 m (and 50 m along) | `junction_span`, `junction_movement` in `backend/src/divert/domain/movement.py` |
+| `legs`, `junction_bearings` | road count and bearings of the span intersection with the most roads (ties: the entry); intersections with < 2 roads are OSRM's depart/arrive points and are ignored; `null` = unknown (4 assumed) | same |
 | `movement` | below | same |
 | `free_left` | below | same |
 | `advice` | lane advice, below; `lane` = `advice.side` (`L`, `C` or `R`, kept for API compatibility) | `plan_lanes` in `backend/src/divert/domain/lanes.py` |
@@ -472,7 +472,9 @@ requested when the leg ends, so planning overlaps the dwell.
 
 The unit stays busy (`RETURNING`) until the RETURN leg ends; then the dispatch is
 `COMPLETED` with `end_reason` `CANCELLED`. A unit that stops within 30 m of its station
-(`legs.AT_HOME_M`) needs no RETURN leg.
+(`legs.AT_HOME_M`) needs no RETURN leg. Distance is measured to the station's OSM point or
+to its road point (`Vehicle.home_road`, the start of the RESPONSE route). A RETURN for
+which OSRM answers zero length (`same_point`) is dropped the same way.
 
 ### 9.3 Estimated time saved
 

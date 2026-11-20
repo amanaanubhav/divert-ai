@@ -255,8 +255,8 @@ the row lock: a unit can have only one dispatch with `ended_at IS NULL`.
 | 2 | Schema | `IncidentCreate` | `type` (max 32 chars), `location` (lat -90..90, lng -180..180), `description` (max 1000), unknown fields rejected |
 | 3 | Normalised | enums | `IncidentType` (MEDICAL, FIRE, CRIME) and `ServiceType` (AMBULANCE, FIRE_ENGINE, POLICE) |
 | 4 | KNN result | `StationCandidate` | `station`, `free_units`, `distance_m` |
-| 5 | OSRM request | HTTP GET | `/route/v1/driving/{lng},{lat};{lng},{lat}` with `overview=full`, `geometries=geojson`, `steps=true`, `annotations=distance,duration,speed`, `alternatives=false` |
-| 6 | Parsed route | `Route` | `points`, `cumulative`, `segment_speeds_mps`, `maneuvers`, `osrm_distance_m`, `osrm_duration_s` |
+| 5 | OSRM request | HTTP GET | `/route/v1/driving/{lng},{lat};{lng},{lat}` with `overview=full`, `geometries=geojson`, `steps=true`, `annotations=distance,duration,speed,nodes`, `alternatives=3` (+ via-point detours) |
+| 6 | Parsed route | `Route` | `points`, `cumulative`, `segment_speeds_mps`, `maneuvers`, `intersections`, `node_ids`, `osrm_distance_m`, `osrm_duration_s` |
 | 7 | Corridor | `CorridorCandidate` then `CorridorSignal` | `signal`, `offset_m`; then `signal_id`, `name`, `pos`, `along_m`, `offset_m`, `lane`, `approach_bearing` |
 | 8 | Plan | `Plan` | `candidate`, `route`, `corridor`, `eta_s` |
 | 9 | Command | `start_dispatch` JSON (`start_command`) | `type`, `v`, `command_id` (`start:<dispatch hex>`), `city`, `incident_id`, `dispatch_id`, `vehicle_id`, `station_id`, `service`, `incident_type`, `destination`, `route` (`points`, `segment_speeds_mps`, `distance_m`, `osrm_distance_m`, `osrm_duration_s`), `corridor[]`, `predicted_eta_s`, `created_at` |

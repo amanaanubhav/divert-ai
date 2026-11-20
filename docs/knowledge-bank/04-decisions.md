@@ -280,7 +280,7 @@ Redis is already required for live state.
 
 **Decision.** `services/routing.py` `OsrmRouter`:
 
-- Calls `GET /route/v1/driving/...` with `overview=full`, `geometries=geojson`, `steps=true`, `annotations=distance,duration,speed`.
+- Calls `GET /route/v1/driving/...` with `overview=full`, `geometries=geojson`, `steps=true`, `annotations=distance,duration,speed,nodes` (`nodes`: OSM node ids per vertex, for signal clusters).
 - Timeout `osrm_timeout_s` = 8 s (connect at most 3 s).
 - `osrm_retries` = 2 retries on transport errors and on HTTP 429/500/502/503/504, with exponential backoff and jitter. `NoRoute` and other 4xx responses are not retried.
 - Successful responses are cached in Redis under `divert:osrm:driving:<sha256[:32]>` for `osrm_cache_ttl_s` = 3600 s, through the request-path guard.

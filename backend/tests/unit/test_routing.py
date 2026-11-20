@@ -3,6 +3,8 @@ cache (keyed by server), detours, errors; corridor projection with movements."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +18,7 @@ from divert.domain.models import CorridorCandidate, Signal
 from divert.domain.route import Route
 from divert.services.dispatch import build_corridor
 from divert.services.routing import (
+    SAME_POINT,
     OsrmRouter,
     RoutingError,
     detour_vias,
@@ -104,6 +107,18 @@ def test_parse_merges_duplicates_and_locates_maneuvers_and_intersections() -> No
     assert route.source == "osrm"
 
 
+def test_a_zero_length_answer_is_a_same_point_routing_error() -> None:
+    """Real public OSRM answer (2026-11-20) for the RETURN of a Vimhans-based ambulance from
+    where its TRANSPORT to Vimhans ended to the station's OSM point, 35.8 m off the road:
+    both snap to the same road point, distance 0 and two identical coordinates."""
+    path = Path(__file__).parents[1] / "data" / "osrm" / "delhi_return_vimhans_same_point.json"
+    body = json.loads(path.read_text(encoding="utf-8"))
+    assert body["routes"][0]["distance"] == 0
+    with pytest.raises(RoutingError) as err:
+        parse_osrm_routes(body)
+    assert err.value.kind == SAME_POINT
+
+
 def test_parse_every_alternative() -> None:
     routes = parse_osrm_routes(osrm_body(10, alternatives=3))
     assert [len(r.points) for r in routes] == [11, 12, 13]
@@ -148,7 +163,7 @@ async def test_request_shape_retry_and_cache(fake_redis: Redis) -> None:
     assert params["overview"] == "full"
     assert params["geometries"] == "geojson"
     assert params["steps"] == "true"
-    assert params["annotations"] == "distance,duration,speed"
+    assert params["annotations"] == "distance,duration,speed,nodes"
     assert params["alternatives"] == "3"
     assert len(r1) == 2
     r2 = await router.alternatives(a, b)  # served from the Redis cache

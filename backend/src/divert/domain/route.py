@@ -78,10 +78,15 @@ class Route:
     osrm_duration_s: float = 0.0
     intersections: tuple[Intersection, ...] = ()
     source: str = "osrm"  # "osrm" (OSRM's own route / alternative) | "detour" (via point)
+    # OSM node id of each point (0 = unknown, e.g. a snapped end point); empty when OSRM
+    # sent none. Consumed at planning time (signal clusters), like the intersections.
+    node_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.points) < 2:
             raise ValueError("a route needs at least two distinct points")
+        if self.node_ids and len(self.node_ids) != len(self.points):
+            raise ValueError("node ids do not match the points")
         if len(self.cumulative) != len(self.points):
             raise ValueError("cumulative distances do not match the points")
         if len(self.segment_speeds_mps) != len(self.points) - 1:
