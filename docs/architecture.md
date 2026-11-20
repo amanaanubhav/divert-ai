@@ -167,19 +167,19 @@ sequenceDiagram
 flowchart TD
     S([every DIVERT_SIM_TICK_S = 0.5 s]) --> L{lease still valid?<br/>renewed every TTL/3}
     L -- no --> SD[step down: drop memory state,<br/>stop writing]
-    L -- yes --> C[apply commands read since last tick<br/>start / cancel - idempotent]
-    C --> V[for each vehicle:<br/>step kinematics dt x time scale]
+    L -- yes --> C[apply commands read since last tick<br/>start / cancel / leg_planned / route_replaced - idempotent]
+    C --> V[for each vehicle:<br/>step its current leg, or dwell / wait for its next leg]
     V --> E{exception?}
     E -- yes --> F[FAILED: release ALL claims,<br/>remove vehicle, emit failed]
     E -- no --> A{arrived?}
-    A -- yes --> AR[ON_SCENE: release ALL claims,<br/>emit arrived travel_s + est. time saved]
+    A -- yes --> AR[leg ended: release ALL claims,<br/>arrived / arrived_hospital / back_in_service,<br/>plan_request for the next leg to the LegPlanner]
     A -- no --> ETA[ETA to destination and to each<br/>corridor signal ahead]
-    ETA --> CL[claim if ETA <= 45 s or <= 600 m;<br/>release when > 20 m past]
+    ETA --> CL[emergency legs: claim at the dynamic lead;<br/>release past the junction box;<br/>RETURN legs: obey the signals]
     CL --> SMP[sample position every 5 sim s]
     AR --> RES
-    SMP --> RES[resolve every claimed signal:<br/>lowest ETA PREEMPTED, others CONFLICT,<br/>5 s tie: AMB > FIRE > POLICE > id]
+    SMP --> RES[resolve every claimed junction:<br/>compatible phases together, priority ranks<br/>within DIVERT_PRIORITY_WINDOW_S, speed advisories]
     F --> RES
-    RES --> SC[ON_SCENE > DIVERT_SCENE_TIME_S: cleared]
+    RES --> SC[dwell over: cleared / handover_complete,<br/>next leg starts when planned]
     SC --> TX["per city: ONE MULTI/EXEC<br/>HSET/HDEL vehicles, claims, vclaims, active signals,<br/>tick, finished, XADD history, XACK commands, PUBLISH"]
     TX --> HB[heartbeat]
 ```

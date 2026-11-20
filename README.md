@@ -118,7 +118,7 @@ nginx image does the same, so nothing is hard-coded to localhost.
 
 | Tab | What it shows |
 |---|---|
-| Live | city map (CARTO tiles, OSM attribution; dark basemap toggle) with every junction signal as a canvas marker, stations by service (hollow = no free unit), active incidents, routes (travelled faded, remaining solid) and vehicles animated between 0.5 s ticks along the route by haversine distance; pre-empted junctions pulse green with ETA + lane advisory + approach arrow, conflicts are amber. Dispatch panel (Medical / Fire / Crime, click inside the dashed city bbox, haversine preview to the nearest station with a free unit, toasts for 422 / 409 / 503 / 429), incidents (status, cancel), fleet (ETA countdown, next signal + distance + claim state, est. time saved), operations stats + activity feed, stream status + simulation clock in city time |
+| Live | city map (OpenStreetMap standard tiles; dark basemap toggle) with every junction signal as a canvas marker, stations by service (hollow = no free unit), active incidents, routes (travelled faded, remaining solid) and vehicles animated between 0.5 s ticks along the route by haversine distance; pre-empted junctions blink green with ETA + lane advisory + approach arrow, conflicts are amber diamonds. Dispatch panel (Medical / Fire / Crime, click inside the dashed city bbox, haversine preview to the nearest station with a free unit, toasts for 422 / 409 / 503 / 429), incidents (status, cancel), fleet (ETA countdown, next signal + distance + claim state, est. time saved), operations stats + activity feed, stream status + simulation clock in city time |
 | History | filterable (type, status, date range in city time), keyset-paginated incident table; detail drawer with timeline, predicted vs actual travel time, pre-emptions and a replay of the recorded track along the route |
 | Analytics | per-city cards and charts for a selectable range: response time p50/p90 by type, incidents by type and status, pre-emptions / conflicts / busiest junctions, ETA error (MAPE), total est. time saved |
 
@@ -128,7 +128,13 @@ npm ci
 npm run dev            # http://localhost:5173 (needs the API on :8000, e.g. docker compose up -d)
 npm run lint && npm run typecheck && npm test && npm run build
 npm run format         # prettier
+npm run check:ui       # real-browser check that no control is covered (local Edge; screenshots in .ui-check/)
 ```
+
+Look: a plain, light operations console (self-hosted Noto Sans, white panels with 1 px
+borders, one civic-blue primary `#1f4e79`, muted status colours; dark mode follows the OS).
+Colours come from `src/lib/palette.ts` and layers from `src/lib/zIndex.ts`; see
+[docs/knowledge-bank/10-codebase-frontend.md](docs/knowledge-bank/10-codebase-frontend.md).
 
 Structure: `src/app` (shell, tab routing `#/{live|history|analytics}/{city}`, providers),
 `src/api` (`types.ts` mirrors [docs/api.md](docs/api.md); REST client; reconnecting
@@ -143,9 +149,10 @@ args: `VITE_API_BASE_URL` (API on another origin; default same origin), `VITE_AP
 
 Environment only, `DIVERT_` prefix (pydantic-settings) - see [.env.example](.env.example).
 Key settings: `DIVERT_DATABASE_URL`, `DIVERT_REDIS_URL`, `DIVERT_OSRM_URL` (default: the
-public OSRM demo, fair use only), `DIVERT_CORRIDOR_M` (30), `DIVERT_PREEMPT_LEAD_S` (45),
-`DIVERT_PREEMPT_DISTANCE_M` (600), `DIVERT_SIM_TICK_S` (0.5), `DIVERT_SIM_TIME_SCALE` (1),
-`DIVERT_SCENE_TIME_S` (120), `DIVERT_LEADER_LOCK_TTL_MS` (5000),
+public OSRM demo, fair use only), `DIVERT_CORRIDOR_M` (30), `DIVERT_PREEMPT_MAX_LEAD_S` (90),
+`DIVERT_PREEMPT_MIN_CLAIM_DISTANCE_M` (150), `DIVERT_ROUTE_ALTERNATIVES` (3), `DIVERT_SIM_TICK_S` (0.5), `DIVERT_SIM_TIME_SCALE` (1),
+`DIVERT_SCENE_TIME_AMBULANCE_S` / `_FIRE_ENGINE_S` / `_POLICE_S` (480 / 1200 / 600),
+`DIVERT_HOSPITAL_HANDOVER_S` (600), `DIVERT_LEADER_LOCK_TTL_MS` (5000),
 `DIVERT_POSITION_RETENTION_DAYS` (30), `DIVERT_API_KEY` (optional, mutating endpoints),
 `DIVERT_RATE_LIMIT_PER_MIN` (60), `DIVERT_CORS_ORIGINS` (explicit list; wildcards rejected).
 
