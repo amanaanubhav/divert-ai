@@ -53,37 +53,44 @@ frontend/
     │   ├── stream.ts        ReconnectingStream (WebSocket with backoff + ping), parseMessage(), backoffDelay()
     │   └── useCityStream.ts hook: stream -> live store, debounced query invalidation, route back-fill
     ├── store/               zustand stores
-    │   ├── live.ts          live state from the stream: vehicles (+ motion), signals, incident statuses, feed
-    │   └── ui.ts            UI state: tab, city, dispatch type, pending pin, selection, layers, dark tiles, focus
+    │   ├── live.ts          live state from the stream: vehicles (+ motion, current-leg route, dwell), signals, incident statuses, feed;
+    │   │                    nextJunction(), dwellElapsedS(), routeIsStale()
+    │   └── ui.ts            UI state: tab, city, dispatch type, pending pin, selection, layers, dark tiles, focus, routePreview
     ├── lib/                 framework-free helpers
     │   ├── geo.ts           haversine geodesy (same model as backend domain/geo.py), interpolateAlong, splitAt
-    │   ├── format.ts        distance / duration / speed / clock formatters, TYPE_LABEL, SERVICE_LABEL, STATUS_LABEL
+    │   ├── format.ts        formatters + labels: TYPE/SERVICE/STATUS, PHASE, LEG, MOVEMENT, JUNCTION_STATE, OUTCOME, RANK, formatSignedPct
+    │   ├── movement.ts      SVG path of the arrow glyph for each junction movement (movementPath)
     │   ├── time.ts          time-zone helpers (city-local days -> UTC instants), RANGE_PRESETS 24h/7d/30d/90d
-    │   ├── palette.ts       the palette (LIGHT, DARK, SERVICE_PALETTE, SIGNAL_PALETTE, MAP_PALETTE): single source of colour
+    │   ├── palette.ts       the palette (LIGHT, DARK, SERVICE/SIGNAL/JUNCTION/LEG/MAP_PALETTE): single source of colour
     │   ├── zIndex.ts        the one z-index scale (Z_INDEX -> Tailwind z-map ... z-skip)
-    │   ├── theme.ts         SERVICE_COLOR, TYPE_COLOR, SERVICE_GLYPH, SIGNAL_COLOR, MAP_COLOR, CHART_NEUTRAL, STATUS_TONE
+    │   ├── theme.ts         SERVICE_COLOR, TYPE_COLOR, SERVICE_GLYPH, SIGNAL/JUNCTION/LEG_COLOR, legColor(), legDash(),
+    │   │                    CHART_NEUTRAL, STATUS_TONE, PHASE_TONE, DISPATCH_STATUS_TONE
     │   └── useNow.ts        Date.now() refreshed on an interval
     ├── components/ui/       shared presentational components
     │   ├── Panel.tsx        Panel (titled section), EmptyState, Spinner, Stat
     │   ├── Button.tsx       Button variants
-    │   ├── Badges.tsx       StatusBadge, TypeBadge, ServiceDot
+    │   ├── Badges.tsx       StatusBadge, TypeBadge, ServiceDot, PhaseChip, DispatchStatusBadge, LegTag (leg + line sample)
+    │   ├── MovementIcon.tsx stroked arrow for a movement (decorative, always next to text)
+    │   ├── LaneDiagram.tsx  n lanes from the left kerb, target lane filled
     │   ├── Segmented.tsx    radio group styled as a segmented control (arrow-key navigation)
     │   ├── toast.ts         zustand toast store + `toast.info/success/warning/error`, TOAST_TTL_MS, MAX_TOASTS, clear()
     │   └── Toaster.tsx      renders the toasts (top centre of the content area, click-through except the close button)
-    ├── features/            one folder per feature
+    ├── features/            one folder per feature (pure helpers in a sibling .ts: react-refresh lint rule)
     │   ├── city-switcher/   CitySwitcher (cities from GET /cities, fallback to CITY_IDS)
     │   ├── dispatch/        DispatchPanel (type, description, submit), DispatchMapLayer (click to place), nearest.ts (preview)
-    │   ├── incidents/       IncidentsPanel (list, cancel), useLiveIncidents (REST + live statuses), merge.ts
-    │   ├── fleet/           FleetPanel (live vehicles: ETA, next signal, claim state, est. time saved)
-    │   ├── map/             LiveMap, LiveVehiclesLayer, ReferenceLayers, MapHelpers, icons
-    │   ├── signals/         ActiveSignalsLayer (pre-empted / conflict markers), signalText.ts
+    │   ├── incidents/       IncidentsPanel (list, hospital, cancel / blocked cancel), useLiveIncidents, merge.ts (+ canCancel)
+    │   ├── fleet/           FleetPanel (vehicle cards), LiveRouteWhy (selected vehicle), fleetText.ts (claimView, laneByText, ...)
+    │   ├── route-choice/    RouteChoiceExplainer ("Why this route"), routeChoice.ts (previewRoutes, candidateNotes)
+    │   ├── map/             LiveMap (+ legend), LiveVehiclesLayer, LegLayers (hospital, free left, route preview), legData.ts,
+    │   │                    ReferenceLayers, MapHelpers, icons
+    │   ├── signals/         ActiveSignalsLayer (five junction states, click popup), signalText.ts (labels, popup model + HTML)
     │   ├── stats/           StatsPanel (live counters + last 24 h), ConnectionStatus (stream, sim clock, /readyz)
-    │   ├── history/         HistoryView (filters, keyset pages), IncidentDrawer, TrackReplay + replay.ts
-    │   └── analytics/       AnalyticsView (per-city cards, charts for a range), Charts.tsx (BarList, PercentileBars)
+    │   ├── history/         HistoryView (filters, keyset pages), IncidentDrawer (+ drawerText.ts), TrackReplay + replay.ts
+    │   └── analytics/       AnalyticsView (per-city cards, charts incl. trip-leg metrics), Charts.tsx (BarList, PercentileBars)
     └── test/                test infrastructure (not shipped)
         ├── setup.ts         jest-dom matchers + Testing Library cleanup after each test
         ├── render.tsx       renderWithProviders(): fresh QueryClient (no retries) + Toaster
-        └── fixtures.ts      DELHI city, incident(), ROUTE, vehicleDoc(), tick(), SUMMARY, mockFetch(), urlOf()
+        └── fixtures.ts      DELHI city, incident(), ROUTE, vehicleDoc(), tick(), SUMMARY, medicalDetail() (3 legs), mockFetch(), urlOf()
 ```
 
 Test files sit next to the code they test (`*.test.ts` / `*.test.tsx`). See section 4.
@@ -128,7 +135,7 @@ flowchart TD
 |---|---|---|
 | Server state from REST: city reference data, incident lists and history, incident detail and track, analytics, `/readyz` | **TanStack Query** (`api/queries.ts`) | Request/response data needs caching, de-duplication, background refetch, cancellation (`signal`), pagination (`useInfiniteQuery` with the keyset cursor) and invalidation after mutations. |
 | Live state pushed by the WebSocket: vehicles with their motion, active signals, tick and sim clock, live incident statuses, activity feed, connection status | **zustand** `useLiveStore` (`store/live.ts`) | A push source, not a request. Each `snapshot` replaces the state wholesale, and `tick` arrives every 0.5 s. The map's `requestAnimationFrame` loop reads `useLiveStore.getState()` 60 times a second and subscribes imperatively (`useLiveStore.subscribe`), so React does not re-render per frame. Components select narrow slices (`useLiveStore((s) => s.vehicles)`). |
-| UI state: tab, city, armed incident type, pending pin, selected vehicle, layer toggles, dark basemap, map focus requests | **zustand** `useUiStore` (`store/ui.ts`) | Shared between the map (imperative Leaflet code) and panels without prop drilling. The tab and city are mirrored to the URL hash (2.5). |
+| UI state: tab, city, armed incident type, pending pin, selected vehicle, layer toggles, dark basemap, map focus requests, route preview (alternatives of the selected vehicle while "Why this route" is hovered) | **zustand** `useUiStore` (`store/ui.ts`) | Shared between the map (imperative Leaflet code) and panels without prop drilling. The tab and city are mirrored to the URL hash (2.5). Changing tab, city or selection clears the route preview. |
 | Toasts | zustand `useToasts` (`components/ui/toast.ts`) | Fire-and-forget from anywhere. `TOAST_TTL_MS`: info and success 3.5 s, warning 6 s, error 10 s. At most 3 are kept (`MAX_TOASTS`). `App` calls `clear()` when the tab or city changes. |
 
 How the two sides are bridged:
@@ -173,9 +180,21 @@ Keys come from the `queryKeys` factory. Mutations (`useCreateIncident`, `useCanc
 | Network back | On the browser `online` event, a pending retry fires immediately. |
 | Close 4404 (`WS_CLOSE_UNKNOWN_CITY`) | Stops for good, status `unknown_city`. |
 | Close 1013 (`WS_CLOSE_TRY_AGAIN`) or any other close | Reconnects with backoff. The server sends 1013 for too many clients, a slow consumer, missed messages after a Redis reconnect, or live state unavailable (`backend api/v1/stream.py`, `api/ws_hub.py`). |
-| Parsing | `parseMessage` drops non-strings, bad JSON, types outside `KNOWN_TYPES` (`snapshot`, `tick`, `vehicle_added`, `vehicle_removed`, `incident_updated`, `pong`) and any `v` greater than `STREAM_SCHEMA_VERSION` (1). |
+| Parsing | `parseMessage` drops non-strings, bad JSON, types outside `KNOWN_TYPES` (`snapshot`, `tick`, `vehicle_added`, `leg_changed`, `route_replaced`, `vehicle_removed`, `incident_updated`, `pong`) and any `v` greater than `STREAM_SCHEMA_VERSION` (1). |
 
 **Snapshot reset.** Every successful connect starts with a `snapshot`. `apply('snapshot')` replaces `vehicles` and `signals` wholesale and clears `lastTickAt`, so a reconnect cannot leave stale vehicles behind. Messages whose `city` differs from the store's city are ignored. A `tick` carries the complete vehicle list and the complete non-NORMAL signal set: vehicles missing from it are dropped, and signals missing from it are NORMAL.
+
+**Trip legs in the store** (`store/live.ts`). A vehicle stays live for its whole trip (RESPONSE, dwell, TRANSPORT, handover, RETURN) until `vehicle_removed` (`back_in_service` or `failed`). The backend publishes `leg_changed` and the re-sent `vehicle_added` before the tick of a new leg.
+
+| Message | Store effect |
+|---|---|
+| `leg_changed` | Phase, leg, `destination_info`, hospital and predicted ETA are set. The route and corridor of the new leg are swapped in (`routeSeq` = leg seq). The motion restarts at the leg start. The dwell clock is cleared. A feed entry is added ("AMB-1 transport leg to Vimhans"). |
+| `vehicle_added` of the same leg | Keeps the motion and the route array identity (`sameRoute`), so the map does not redraw it. A different dispatch or leg resets the motion. |
+| `route_replaced` | Splices in the re-routed leg route without restarting the motion. A message for another leg is ignored. |
+| `tick` | Copies the trip-leg fields (`phase`, `leg`, `destination_info`, `planning`, `next_movement`, `speed_advisory_mps`) only when present (older servers omit them). If its leg is newer than `routeSeq`, the stale route is dropped and the vehicle snaps; `vehiclesMissingRoute` then lists it and `useCityStream` back-fills it from `/vehicles`. `mergeRoutes` never takes an older leg's document. |
+| stop (`status` `ON_SCENE`) | Records `dwellSinceSim` on the simulation clock (`sim_ts`, or the snapshot's `dwell_s`). `dwellElapsedS()` gives the dwell time the fleet card shows. |
+
+`nextJunction(v)` prefers the server's `next_movement` (movement, lane index of total, advice text, `lane_by_m = advise_at_m - along_m`) and falls back to the first corridor entry ahead for older servers.
 
 ### 2.4 Map rendering (`features/map`, `features/signals`, `features/dispatch`)
 
@@ -187,18 +206,24 @@ Keys come from the `queryKeys` factory. Mutations (`useCreateIncident`, `useCanc
 | `FitToBBox`, `FocusController` | `useMap()` effects | Fits the city bbox and restricts panning to the bbox plus 35 %. A `ResizeObserver` refits until the user moves the map. `flyTo` handles `useUiStore.focus` requests. |
 | `CityBoundsLayer`, `SignalsLayer`, `StationsLayer` (`ReferenceLayers.tsx`) | `L.rectangle` / `L.circleMarker` in a `layerGroup` on the **canvas** | No DOM node per marker, so hundreds of signals and over a thousand stations stay smooth. Radius depends on zoom. Tooltips are created lazily. Stations are hollow when no unit is free. |
 | `IncidentsLayer` | react-leaflet `Marker` + `divIcon` | Active incidents only. |
-| `LiveVehiclesLayer` | Imperative `L.marker` with a `divIcon` (DOM) + three canvas polylines per route (faded dashed "travelled", white casing, solid "remaining") | Re-synced only when `vehicles` changes (`useLiveStore.subscribe`). Moved by a `requestAnimationFrame` loop. |
-| `ActiveSignalsLayer` | Imperative `L.marker` per active signal, updated in place each tick | PREEMPTED: a green dot that blinks on/off (static with reduced motion). CONFLICT: an amber diamond (shape, not only colour). Both carry an ETA and lane label and an approach arrow. Never re-created, so the blink does not restart. |
+| `LiveVehiclesLayer` | Imperative `L.marker` with a `divIcon` (DOM) + three canvas polylines per route (faded dashed "travelled", white casing, "remaining") | The current leg in its style (`legData.legLineStyles`): RESPONSE solid in the service colour, TRANSPORT solid violet, RETURN dashed grey. Redrawn when the route array or the leg kind changes. A vehicle on TRANSPORT gets a violet patient badge (`.veh.has-patient`). Re-synced only when `vehicles` changes (`useLiveStore.subscribe`). Moved by a `requestAnimationFrame` loop. |
+| `LegExtrasLayer` (`LegLayers.tsx`) | Imperative markers | The destination hospital of every vehicle that is TRANSPORTING or AT_HOSPITAL (white square, violet border, "H", tooltip with the emergency-department tag). A "free left" tag at corridor junctions still ahead whose slip road bypasses the signal (never claimed). |
+| `RoutePreviewLayer` (`LegLayers.tsx`) | Canvas polylines + permanent labels | `useUiStore.routePreview`: the alternatives of the selected vehicle's route as thin dashed grey lines labelled "Route B", only while "Why this route" is hovered or focused. |
+| `ActiveSignalsLayer` | Imperative `L.marker` per active signal, updated in place each tick | Each junction state has its own shape (shape first, colour second): TRANSITIONING = hollow green ring + "green in n s", PREEMPTED = solid green dot that blinks on/off (static with reduced motion), QUEUED = amber diamond + "queued (n)", RECOVERING = hollow grey ring + "recovering, n s". An approach arrow (hidden while recovering) and a short hover tooltip. A click opens a popup (`signalText.popupModel` / `popupHtml`, values escaped): state and hint, countdowns (transition left, held green, back to plan), green extended or red truncated, the plan (phases, cycle), and the claimant queue (order, vehicle, movement, rank, state, expected green, ETA). The popup is refreshed while open and is never wider than the map. Its scroll height is fitted to the room above the marker (`fitPopupAbove`), because the map's max bounds can stop auto-pan near the city edge; so the title and close button stay inside the map on a phone. While a popup is open, the map's own controls (layers, legend) are hidden (`.map-popup-open > .map-controls`), so they never cover it. A legacy `CONFLICT` reads as QUEUED. Never re-created, so the blink does not restart. |
 | `DispatchMapLayer` | `useMapEvents` + react-leaflet `Marker` / `Polyline` | A click inside the bbox sets the pending pin (outside: a warning, nothing sent). The pin is draggable. A straight-line preview goes to the nearest station of the armed service (`nearest.ts`, haversine; the server ranks by routed ETA). |
 
 **Interpolation between ticks** (`store/live.ts`, `lib/geo.ts`):
 1. Each `tick` stores a `Motion` per vehicle: `fromAlong` (where it is drawn now), `toAlong` (the new `along_m`), and `durMs`.
 2. `durMs` is the measured tick interval: an exponential average `0.7 x previous + 0.3 x measured`, clamped to 150..2000 ms, starting at `DEFAULT_TICK_MS = 500`.
 3. Every frame, `vehiclePose(v, now)` interpolates `along` linearly in time. `interpolateAlong(route, cum, along)` turns it into a position and heading by **cumulative haversine distance** along the route. That is the same spherical model as the backend: `EARTH_RADIUS_M = 6_371_008.8` in both `lib/geo.ts` and `backend/src/divert/domain/geo.py`. The cumulative distances `cum` are computed once per route.
-4. A backward jump (new `along_m` more than 1 m behind the drawn position, or a different `dispatch_id`, for example after a worker failover) snaps instead of animating.
+4. A backward jump snaps instead of animating. That is a new `along_m` more than 1 m behind the drawn position, a different `dispatch_id` (for example after a worker failover), or a new leg (`along_m` restarts at 0 on every leg).
 5. The travelled/remaining split (`splitAt`) is recomputed at most every `SPLIT_EVERY_MS = 120` ms, and only after more than 1 m of movement.
 
-The history replay (`features/history/TrackReplay.tsx` + `replay.ts`) uses the same idea on recorded samples. Between two samples of the same dispatch that have `along_m`, the vehicle follows the recorded route. Otherwise it moves in a straight line.
+The history replay (`features/history/TrackReplay.tsx` + `replay.ts`) uses the same idea on recorded samples.
+- **Within a leg:** routes are keyed by `legKey(dispatch_id, leg_seq)`, because `along_m` restarts on every leg. Between two samples of the same leg that have `along_m`, the vehicle follows that leg's route. Otherwise (a leg change, or an older payload without legs) it moves in a straight line.
+- **Older payloads:** `drawableLegs()` uses `legs[]`, or falls back to the dispatch route as the RESPONSE leg.
+- **Leg spans:** `legSpans()` places the legs on the replay time axis. That axis is wall-clock time, so dwells show as stops. The spans drive the leg bar and its "jump to leg" buttons.
+- **Drawing:** `travelledByLeg()` draws the travelled path in each leg's style.
 
 ### 2.5 Hash routing `#/{tab}/{city}`
 
@@ -232,9 +257,16 @@ The console is meant to look like a plain civic operations tool: light by defaul
 | `primary` (+ `-hover`, `-active`, `-subtle`) | `#1f4e79` (`#183f62`, `#12304b`, `#e7eef6`) | `#2a5f94` (`#2f6aa3`, `#245281`, `#1f2d3d`) | primary buttons, selected segment, selected row |
 | `accent` | `#1f4e79` | `#8ab4e0` | primary as text: selected tab underline, links, focus outline |
 | `ok` / `warn` / `bad` / `info` (+ `-subtle`) | `#1e6b34` / `#8a5a00` / `#b42318` / `#1f4e79` | `#6cc082` / `#d9a441` / `#f08c84` / `#8ab4e0` | status text and badge backgrounds only |
+| `transport` (+ `-subtle`) | `#5b2ca6` (`#f1ecfa`) | `#b9a3ee` (`#2a2438`) | TRANSPORTING / AT_HOSPITAL chips and the "to {hospital}" line |
 
 - **Dark mode** follows `prefers-color-scheme` (the same variables, redefined in a media query; neutral charcoal, no navy or neon). There is no separate theme switch. The map's **Dark basemap** toggle (`useUiStore.darkTiles`, `localStorage` key `divert.darkTiles`) defaults to the OS scheme when nothing is stored; `TrackReplay` honours it too.
 - **Map colours** are the same in both themes (they sit on the tiles): `SERVICE_PALETTE` ambulance `#0072b2`, fire engine `#d55e00`, police `#3d4451` (Okabe-Ito based); `SIGNAL_PALETTE` NORMAL `#6e7781`, PREEMPTED `#1a7f37`, CONFLICT `#bf8700`; `MAP_PALETTE` pending pin `#1f2328`, service-area outline `#1f4e79`. `index.css` reads the signal and map ones as `--map-*` variables. `lib/theme.ts` re-exports them (`SERVICE_COLOR`, `TYPE_COLOR`, `SIGNAL_COLOR`, `MAP_COLOR`) with `SERVICE_GLYPH`, `CHART_NEUTRAL` and `STATUS_TONE` (badge classes). Shape and label are always the second cue next to colour (glyphs per service, a diamond for a conflict).
+- **Trip legs and junction states** (`LEG_PALETTE`, `JUNCTION_PALETTE`, design section 6):
+  - **Legs:** RESPONSE is drawn in the service colour.
+  - **TRANSPORT** is a solid violet `#6c35c2`. Its CIE76 ΔE is at least 20 from every service colour, including the ambulance blue, under normal vision and protan, deutan and tritan simulation (21.3 at worst). A white glyph on it reaches 7.2:1.
+  - **RETURN** is a dashed grey `#6e7781`; the dash, not the colour, says "not an emergency".
+  - **Junction states** reuse the three tested signal colours and differ by shape and fill: TRANSITIONING = hollow green ring, PREEMPTED = solid green dot, QUEUED = amber diamond, RECOVERING = hollow grey ring.
+  - **Legend:** the live map's legend is a `<details>`. It is open from `xl`, where the map has room, and collapsed below; it lists the services, the three leg styles, the destination hospital, the four junction shapes, the free left and a normal signal.
 - **`lib/palette.test.ts`** keeps it honest: WCAG AA (4.5:1) for every text/background pair in light and dark, 3:1 for input borders, the focus outline, white glyphs on service colours and service colours on light surfaces, and a minimum CIE76 ΔE of 20 between service colours and between signal colours under normal, protan, deutan and tritan vision (Machado 2009 simulation). The old blue/violet pair failed this for deuteranopia (ΔE 1.7).
 
 **Type.** Self-hosted **Noto Sans** 400/500/600 (`@fontsource/noto-sans`, imported in `main.tsx`; its subsets include Latin and Devanagari, while Bengali would need the separate Noto Sans Bengali family). The files are emitted to `/assets` (never inlined: `vite.config.ts` `assetsInlineLimit`), so the nginx CSP `font-src 'self'` holds. Fallback: Segoe UI, Roboto, Helvetica, Arial, sans-serif. Body text is 14 px. Labels are sentence case with normal letter-spacing, no weight above 600, figures use `tabular-nums`; monospace is kept for identifiers (vehicle ids, signal ids, request ids).
@@ -273,7 +305,22 @@ All configuration is build-time (`import.meta.env.VITE_*`), plus two browser-loc
 
 `api/client.ts` `request<T>()` turns every non-2xx answer into an `ApiError(status, code, message, details, requestId)`, using the backend's `{"error": {...}, "request_id"}` body when present. Otherwise the code is `http_<status>`. A network failure becomes `status 0`, `code 'network_error'`. An `AbortError` (query cancellation) is re-thrown as is.
 
-`describeError()` maps known codes to operator-friendly text (`no_unit_available`, `routing_unavailable`, `invalid_incident`, `unauthorized`, `rate_limited` with `retry_after_s`, `network_error`). Toasts can show the request id for support.
+`describeError()` maps known codes to operator-friendly text (`no_unit_available`, `routing_unavailable`, `invalid_incident`, `unauthorized`, `rate_limited` with `retry_after_s`, `network_error`, `cannot_cancel_transport`, `invalid_state`). Toasts can show the request id for support.
+
+### 2.9 Trip legs in the UI (design section 6)
+
+The backend contract is in [api.md](../api.md) ("Trip legs", the live vehicle fields, `leg_changed` / `route_replaced`) and the design is [trip-legs-and-dynamic-preemption.md](../design/trip-legs-and-dynamic-preemption.md).
+
+| Where | What it shows | Code |
+|---|---|---|
+| Live map | The current leg of each vehicle: RESPONSE solid service colour, TRANSPORT solid violet with a patient badge, RETURN dashed grey. The destination hospital is highlighted. Free-left junctions are tagged. Junction states have their own shapes and a click popup (2.4). | `LiveVehiclesLayer`, `LegLayers`, `ActiveSignalsLayer` |
+| Fleet card | Each vehicle card shows:<ul><li>a phase chip (Responding, On scene, Transporting, At hospital, Returning)</li><li>the leg (with a sample of its line) and destination</li><li>the next movement as an arrow plus text ("Right in 75 m at ITO crossing")</li><li>how the junction treats it: changing to green, green held, queued (position n), not claimed yet, obeys the signal (RETURN), or slip road</li><li>the advice text</li><li>a lane diagram with "Be in lane n within x m" (or "Stay in lane n", or "Single lane: traffic pulls left")</li><li>the speed advisory ("Slow to 18 km/h: green expected on arrival", or stop at the stop line)</li><li>"Planning route…" with the planner's last error</li><li>the dwell time "of" the configured dwell on scene or at the hospital (simulated)</li></ul>The selected vehicle also shows "Why this route" for its current leg (incident detail `legs[].route_choice`). | `FleetPanel`, `fleetText.ts`, `LiveRouteWhy`, `MovementIcon`, `LaneDiagram` |
+| "Why this route" | The reason, then each candidate:<ul><li>distance, travel time and cost</li><li>crowd index and signals</li><li>right turns, contested junctions and incident zones</li><li>the busiest road</li></ul>Hovering or focusing it publishes the alternatives' geometries as a route preview, which the map draws faint and dashed. **The backend records candidate costs but not their geometry** (`route_choice.candidates[].route` is not sent today), so the explainer says the alternatives cannot be drawn. The frontend draws them as soon as the field is present. | `RouteChoiceExplainer`, `routeChoice.ts` |
+| Incidents panel | TRANSPORTING and AT_HOSPITAL chips, with the destination hospital. While a patient is on board, Cancel is `aria-disabled` with a tooltip and an explanatory toast on click. A 409 `cannot_cancel_transport` (a race with the worker) gets a "Cannot cancel" toast. A live `incident_updated` with `reason` "cancel refused: ..." restores the real status even after a CANCELLED. | `IncidentsPanel`, `merge.ts` |
+| History drawer | <ul><li>Summary times including transport started and at hospital.</li><li>Response and call-to-hospital in simulated seconds, as the analytics compute them.</li><li>The trip status per dispatch.</li><li>One card per leg: destination, distance, emergency or "obeys signals", corridor junctions (free lefts), pre-emptions, re-routes, predicted vs actual bars, and the error (`eta_error_pct` = (actual − predicted) / actual) against ±10 %. Each card has "Why this route", previewed on the replay map.</li><li>The hospital: its emergency-department tag, why it was chosen, and the hospitals considered.</li><li>Pre-emptions with leg, movement, lane n of m, green extended / red truncated, outcome and waited time.</li><li>The timeline grouped by leg.</li><li>The replay across all legs, with a leg bar and jump buttons.</li></ul> | `IncidentDrawer`, `drawerText.ts`, `TrackReplay`, `replay.ts` |
+| Analytics | <ul><li>City cards add transports, call-to-hospital p50 and re-routes.</li><li>"Pre-emption outcomes": green extended, red truncated, free-left passes, re-routes, the extension vs truncation split, and the outcome bars.</li><li>"Patient transport": p50 / p90 of transport, call-to-hospital and handover-to-back-in-service, plus the hospital distribution.</li><li>"ETA accuracy by leg": MAPE and worst error per leg kind, scaled to 10 %.</li><li>"Dispatches by status (whole trip)".</li></ul>Each panel is left out when an older server does not send its fields. | `AnalyticsView` |
+
+Older servers keep working: every trip-leg field is optional in `api/types.ts`, the phase falls back to the legacy two-value status, and the next junction falls back to the corridor.
 
 ---
 
@@ -332,12 +379,22 @@ sequenceDiagram
 | `features/history/replay.test.ts` | `prepareReplay` / `frameAt` road-following replay |
 | `features/incidents/merge.test.ts` | Forward-only status merge of REST and live data; also `parseHash` / `formatHash` round-trip (hash routing) |
 | `features/analytics/AnalyticsView.test.tsx` | Per-city cards and the selected city's charts |
-| `lib/palette.test.ts` | WCAG AA contrast of every text/background token pair (light and dark), 3:1 for borders, focus and service colours, colour-blind separation (ΔE >= 20) of service and signal colours, CSS variable generation |
+| `lib/palette.test.ts` | WCAG AA contrast of every text/background token pair (light and dark, including `transport`), 3:1 for borders, focus and service colours, colour-blind separation (ΔE >= 20) of service and signal colours and of the TRANSPORT violet from every service colour and RETURN, junction states on the three signal colours, CSS variable generation |
+| `store/live.legs.test.ts` | Dwell clock on the simulation time, `leg_changed` (route swap, motion restart, hospital, feed), the re-sent `vehicle_added` keeps route identity and motion, a tick on a newer leg drops the stale route and `mergeRoutes` refuses an older leg, `route_replaced` (splice, other leg ignored), back in service, TRANSPORTING with hospital, `nextJunction` (server movement, "be in lane by", corridor fallback) |
+| `lib/movement.test.ts` | Arrow paths: straight symmetric, lefts left / rights right, a glyph for every movement, U-turn to the right, roundabout |
+| `features/fleet/FleetPanel.test.tsx` | Older-server card; phase chip, leg and destination, next movement, queued claim with position, advice text, lane diagram, "be in lane", speed advisory; planning (with error), handover dwell, RETURN obeys signals; the selected vehicle's "Why this route" previews the alternative on hover and clears on leave; `laneByText` |
+| `features/signals/signalText.test.ts` | State mapping and marker classes (legacy CONFLICT = queued), labels and countdowns of all four active states, claimant order, popup model (rows, claimant queue with movement, rank, lane n of m, expected green), HTML escaping |
+| `features/map/LegLayers.test.ts` | Destination hospitals (TRANSPORTING / AT_HOSPITAL only), free-left junctions ahead, leg line styles |
+| `features/incidents/IncidentsPanel.test.tsx` | Transport statuses with the hospital, blocked cancel (aria-disabled, tooltip, description, toast), 409 `cannot_cancel_transport` toast with the request id, `canCancel` |
+| `features/history/IncidentDrawer.test.tsx` | Three legs with predicted vs actual and errors, free lefts and pre-emptions per leg, hospital choice, "Why this route" preview on the replay map, pre-emption table (leg, movement, lane, outcome, green / red), timeline grouped by leg; helpers (`legErrorPct`, `tripTimes`, `timelineLegs`, `payloadSummary`, the pre-legs fallback) |
+| `features/history/replay.test.ts` | (also) replay across legs: per-leg routes, `along_m` restarting per leg, leg spans, travelled path per leg |
+| `features/analytics/AnalyticsView.test.tsx` | (also) transport times, hospitals, ETA accuracy by leg, pre-emption outcomes, green vs red split, dispatches by status; panels left out for an older server |
 
 **Not tested:**
 - **No functional end-to-end tests in CI.** The real-browser `check:ui` (4.1) only checks that controls are reachable; it is run by hand, not in CI.
 - Nothing that needs Leaflet's canvas: `LiveMap`, `LiveVehiclesLayer`, `ReferenceLayers`, `ActiveSignalsLayer`, `DispatchMapLayer`, `TrackReplay`. jsdom has no canvas. Their logic is covered through `store/live.ts`, `lib/geo.ts` and `replay.ts`.
-- The `App` shell, including the `useHashRoute` effect (`parseHash` / `formatHash` are tested), `useCityStream` as a whole (its parts are tested), `IncidentsPanel`, `StatsPanel`, `ConnectionStatus`, `ApiKeyButton`.
+- The `App` shell, including the `useHashRoute` effect (`parseHash` / `formatHash` are tested), `useCityStream` as a whole (its parts are tested), `StatsPanel`, `ConnectionStatus`, `ApiKeyButton`.
+- The Leaflet parts of the trip-leg UI (leg lines, patient badge, hospital marker, free-left tags, junction shapes and popup, route preview, replay leg bar) need a canvas: their logic is unit-tested (`legData`, `signalText`, `replay`), their look and reachability only by `check:ui` screenshots.
 - The nginx configuration, pixel-level visual regressions, and accessibility beyond the `jsx-a11y` lint rules and the palette contrast test.
 
 CI (`.github/workflows/ci.yml`, job `frontend`, Node 22) runs `npm ci`, `format:check`, `lint` (zero warnings), `typecheck`, `test` and `build`. The `docker` job then builds the image (without pushing).
@@ -346,7 +403,23 @@ CI (`.github/workflows/ci.yml`, job `frontend`, Node 22) runs `npm ci`, `format:
 
 A dev-only regression check for overlapping UI (`scripts/clickability.mjs`). jsdom has no layout engine, so it cannot see one panel painting over another; this drives a real browser instead. `playwright-core` is a devDependency used only here: it drives the locally installed Microsoft Edge (falls back to Chrome, then a Playwright Chromium if one was installed with `npx playwright-core install chromium`) and downloads no browser. Nothing of it is in the bundle or the nginx image.
 
-For every city (Delhi, Kolkata, Bengaluru) and viewport (360x740, 768x1024, 1024x768, 1280x800, 1440x900, 1920x1080) it opens Live, History and Analytics and, for every visible button, link, tab, radio, checkbox and input, asserts that `document.elementFromPoint(centre)` is the control or inside it. Controls already on screen are tested where they are; controls clipped by a scroll area are scrolled into view first, and one that cannot be is reported as unreachable. It repeats the check after a dispatch (map click + Dispatch, success toast visible), after switching to History right after it, with a toast raised in History (API-key Save), with the API-key popover open (its own controls) and with the History drawer open (dialog controls). It also records any Content-Security-Policy violation reported in the browser console (for example a font or script the CSP blocks). Screenshots and `results.json` go to `frontend/.ui-check/` (gitignored). It exits 1 on any covered or unreachable control or CSP violation.
+For every city (Delhi, Kolkata, Bengaluru) and viewport (360x740, 768x1024, 1024x768, 1280x800, 1440x900, 1920x1080) it opens Live, History and Analytics and, for every visible button, link, tab, radio, checkbox and input, asserts that `document.elementFromPoint(centre)` is the control or inside it. Controls already on screen are tested where they are; controls clipped by a scroll area are scrolled into view first, and one that cannot be is reported as unreachable. It repeats the check in these states:
+- with the transporting ambulance selected and its "Why this route" open (alternatives drawn on the map)
+- with a queued junction's popup open (closed again afterwards)
+- after a dispatch (map click + Dispatch, success toast visible), and after switching to History right after it
+- with a toast raised in History (API-key Save)
+- with the API-key popover open (its own controls)
+- with the History drawer open (dialog controls), and with a "Why this route" open and hovered inside it
+
+That makes 11 states per city and viewport, 198 in all. The mocks (`scripts/ui-check-mocks.mjs`) carry every trip-leg state:
+- a TRANSPORT leg with a patient, a free left and the destination hospital
+- a RESPONSE leg with a speed advisory and a queued claim
+- a unit on scene
+- a unit at the hospital planning its RETURN leg
+- a RETURN leg
+- one junction in each state
+- history details with three legs, a hospital choice and route choices with geometries
+- the trip-leg analytics It also records any Content-Security-Policy violation reported in the browser console (for example a font or script the CSP blocks). Screenshots and `results.json` go to `frontend/.ui-check/` (gitignored). It exits 1 on any covered or unreachable control or CSP violation.
 
 ```bash
 npm run build && npm run check:ui                        # mock mode: vite preview of dist/, API + WebSocket mocked (scripts/ui-check-mocks.mjs), tiles stubbed
