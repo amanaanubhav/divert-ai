@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-from divert.domain.enums import ServiceType, UnitStatus
+from divert.domain.enums import IncidentType, ServiceType, UnitStatus
 from divert.domain.geo import BBox, LatLng
 
 
@@ -51,6 +51,8 @@ class Station:
     name: str | None
     pos: LatLng
     osm_ref: str  # "node/123", "way/456", "relation/789"
+    emergency: str | None = None  # hospitals: OSM emergency=yes|no (None = untagged)
+    healthcare: str | None = None  # hospitals: OSM healthcare=*
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +87,15 @@ class StationCandidate:
     station: Station
     free_units: int
     distance_m: float  # straight-line (geodesic) distance to the incident
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentZone:
+    """An active incident, as a source of crowding for other vehicles' routes."""
+
+    incident_id: str
+    type: IncidentType
+    center: LatLng
 
 
 @dataclass(frozen=True, slots=True)
