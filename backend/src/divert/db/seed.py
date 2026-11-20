@@ -96,6 +96,7 @@ async def seed_city(
                 "active": True,
                 "emergency": s.emergency,
                 "healthcare": s.healthcare,
+                "speciality": s.speciality,
             }
         )
     for st_chunk in _chunks(station_rows):
@@ -111,6 +112,7 @@ async def seed_city(
                     "active": sa.true(),
                     "emergency": ins.excluded.emergency,
                     "healthcare": ins.excluded.healthcare,
+                    "speciality": ins.excluded.speciality,
                     "updated_at": sa.func.now(),
                 },
             )

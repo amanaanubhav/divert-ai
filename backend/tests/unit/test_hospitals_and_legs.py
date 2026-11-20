@@ -37,11 +37,16 @@ C = city("delhi").center
 
 
 def hospital(
-    sid: str, *, emergency: str | None = None, healthcare: str | None = None, name: str = "H"
+    sid: str,
+    *,
+    emergency: str | None = None,
+    healthcare: str | None = None,
+    name: str = "H",
+    speciality: str | None = None,
 ) -> Station:
     return Station(
         sid, "delhi", ServiceType.AMBULANCE, name, C, f"node/{abs(hash(sid)) % 10**6}",
-        emergency=emergency, healthcare=healthcare,
+        emergency=emergency, healthcare=healthcare, speciality=speciality,
     )  # fmt: skip
 
 
@@ -75,6 +80,72 @@ def test_eligibility_excludes_no_emergency_and_non_acute(
 
 def test_unnamed_hospital_is_not_eligible() -> None:
     assert not is_eligible(hospital("H", name=""))
+
+
+# real healthcare:speciality values and names from the cached Overpass payloads (B6)
+@pytest.mark.parametrize(
+    ("speciality", "eligible"),
+    [
+        ("ophthalmology", False),
+        ("ophthalmology;optometry", False),
+        ("Neuro Ophthalmology; Pediatric Ophthalmology ; Ophthalmology", False),
+        ("Eye Care; Dental Care", False),
+        ("dental_oral_maxillo_facial_surgery", False),
+        ("dentistry;prosthodontist;pediatric_dentist", False),
+        ("Cataract", False),
+        ("dermatology", False),
+        ("fertility", False),
+        ("diagnostic_radiology;radiology;pathology;clinical_pathology", False),
+        ("ayurveda", False),
+        ("physiotherapy", False),
+        ("physiotherapy;emergency", True),  # one acute speciality keeps it eligible
+        ("general;dentistry;gynaecology;orthopaedics", True),
+        ("otolaryngology;maternity", True),
+        ("multi speciality", True),
+        ("cardiology", True),
+        ("trauma", True),
+    ],
+)
+def test_specialities_that_cannot_take_an_emergency_patient_are_skipped(
+    speciality: str, eligible: bool
+) -> None:
+    assert is_eligible(hospital("H", name="X Hospital", speciality=speciality)) is eligible
+    # ... unless the hospital is a confirmed emergency department
+    assert is_eligible(hospital("H", name="X", speciality=speciality, emergency="yes"))
+
+
+@pytest.mark.parametrize(
+    ("name", "eligible"),
+    [
+        ("Netaji Eye Hospital", False),
+        ("Aurobindo Netralaya", False),
+        ("Netradama Eye Hospital", False),
+        ("Maulana Azad Institute of Dental Sciences", False),
+        ("Dr Rafi Ahmed Dental College & Hospital", False),
+        ("Dayal Eye & Maternity Centre", False),
+        ("Government Ayurvedic Hospital", False),
+        ("Unani Hospital", False),
+        # after the word "hospital" the keyword names an extra unit of a general hospital
+        ("Leela Hospital and Diagnostic Center", True),
+        ("Sheetla Hospital And Eye Institute Private Ltd", True),
+        ("Sunand Hospital & IVF Centre", True),
+        # general care named too
+        ("NRS Medical & Dental Specialists Centre", True),
+        ("Delhi Eye Multi Speciality Centre", True),
+        # no keyword ("Netaji" is not "netra"; "Ardent" is not "dent")
+        ("Netaji Subhas Hospital", True),
+        ("Ardent Ganpati Hospital", True),
+        ("Government Hospital", True),
+    ],
+)
+def test_untagged_hospitals_fall_back_to_name_keywords(name: str, eligible: bool) -> None:
+    assert is_eligible(hospital("H", name=name)) is eligible
+    assert is_eligible(hospital("H", name=name, emergency="yes"))
+
+
+def test_a_speciality_tag_takes_precedence_over_the_name() -> None:
+    assert is_eligible(hospital("H", name="Nangia Hospital Eye", speciality="general"))
+    assert not is_eligible(hospital("H", name="City Hospital", speciality="ophthalmology"))
 
 
 # ------------------------------------------------------------------------- choice

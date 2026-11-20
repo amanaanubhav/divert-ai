@@ -20,6 +20,7 @@ from divert.db.models import Unit as UnitRow
 from divert.db.repositories.reference import ReferenceRepository
 from divert.domain.enums import ServiceType, UnitStatus
 from divert.domain.geo import LatLng, cumulative_distances, haversine_m, project_onto_polyline
+from divert.domain.hospitals import is_eligible
 from divert.domain.models import Signal
 
 pytestmark = pytest.mark.integration
@@ -73,6 +74,34 @@ async def test_knn_matches_brute_force(
     # every returned station is among the true top-3 unless it is a near tie
     kth = brute[min(3, len(brute)) - 1][0]
     assert all(c.distance_m <= kth * 1.005 + 1.0 for c in got)
+
+
+async def test_nearest_hospitals_skip_non_emergency_specialities(
+    session: AsyncSession, city_id: str
+) -> None:
+    """Stage 5 fix-2 B6: the seeded speciality reaches the TRANSPORT filter; the KNN
+    over-fetch still returns the 6 nearest ELIGIBLE hospitals (brute force over the
+    snapshot), at the densest eye-hospital cluster as well as at the city centre."""
+    repo = ReferenceRepository(session)
+    snap = load_snapshot(city_id)
+    eligible = [s for s in snap.stations if s.service is ServiceType.AMBULANCE and is_eligible(s)]
+    restricted = [
+        s for s in snap.stations
+        if s.service is ServiceType.AMBULANCE and s.name and s.speciality
+        and not is_eligible(s)
+    ]  # fmt: skip
+    assert restricted, "every city has tagged eye / dental hospitals"
+    seeded = await repo.get_station(restricted[0].id)
+    assert seeded is not None
+    assert seeded.speciality == restricted[0].speciality
+    for scene in (snap.city.center, restricted[0].pos):
+        got = await repo.nearest_hospitals(city_id, scene, limit=6)
+        brute = sorted(eligible, key=lambda s: (haversine_m(scene, s.pos), s.id))[:6]
+        assert len(got) == 6
+        assert all(is_eligible(c.station) for c in got)
+        assert restricted[0].id not in {c.station.id for c in got}
+        kth = haversine_m(scene, brute[-1].pos)
+        assert all(c.distance_m <= kth * 1.005 + 1.0 for c in got)
 
 
 async def test_knn_skips_stations_without_free_units(session: AsyncSession, city_id: str) -> None:

@@ -53,6 +53,7 @@ class Station:
     osm_ref: str  # "node/123", "way/456", "relation/789"
     emergency: str | None = None  # hospitals: OSM emergency=yes|no (None = untagged)
     healthcare: str | None = None  # hospitals: OSM healthcare=*
+    speciality: str | None = None  # hospitals: OSM healthcare:speciality (raw)
 
 
 @dataclass(frozen=True, slots=True)

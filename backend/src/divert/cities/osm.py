@@ -8,8 +8,8 @@ Per city:
   * ``node[highway=traffic_signals]`` -> clustered (single linkage, 40 m) into
     junction-level signals that keep their member OSM node ids;
   * ``amenity=hospital`` -> AMBULANCE bases (named ones only), with their ``emergency``
-    (yes / no / null = untagged) and ``healthcare`` tags for hospital selection (design
-    §1.1);
+    (yes / no / null = untagged), ``healthcare`` and ``healthcare:speciality`` (as
+    ``speciality``, raw) tags for hospital selection (design §1.1);
   * ``amenity=fire_station`` -> FIRE_ENGINE bases; ``amenity=police`` -> POLICE bases.
 
 The ``traffic`` block (hourly congestion factors, average junction delay) is NOT OSM
@@ -322,12 +322,16 @@ def extract_stations(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def hospital_tags(tags: dict[str, str]) -> dict[str, str | None]:
-    """``emergency`` (yes / no; other values and untagged -> None) and ``healthcare``."""
+    """``emergency`` (yes / no; other values and untagged -> None), ``healthcare`` and
+    ``speciality`` (OSM ``healthcare:speciality``, kept whole: every listed value counts
+    for eligibility). No other speciality key occurs on the cached hospitals."""
     emergency = tags.get("emergency", "").strip().lower()
     healthcare = tags.get("healthcare", "").strip().lower()
+    speciality = tags.get("healthcare:speciality", "").strip()
     return {
         "emergency": emergency if emergency in EMERGENCY_VALUES else None,
         "healthcare": healthcare[:HEALTHCARE_MAX_LEN] or None,
+        "speciality": speciality or None,
     }
 
 

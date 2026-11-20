@@ -96,6 +96,7 @@ class HistoryService:
                 "location": [station.pos.lat, station.pos.lng],
                 "emergency": station.emergency,
                 "healthcare": station.healthcare,
+                "speciality": station.speciality,
             }
         return detail
 

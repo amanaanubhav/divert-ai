@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import sqlalchemy as sa
 from geoalchemy2 import Geometry
@@ -28,7 +28,7 @@ from divert.db.models import Station as StationRow
 from divert.db.models import Unit as UnitRow
 from divert.domain.enums import ServiceType, UnitStatus
 from divert.domain.geo import BBox, LatLng
-from divert.domain.hospitals import NON_ACUTE_HEALTHCARE
+from divert.domain.hospitals import NON_ACUTE_HEALTHCARE, is_eligible
 from divert.domain.models import (
     City,
     CorridorCandidate,
@@ -39,6 +39,12 @@ from divert.domain.models import (
     TrafficProfile,
     Unit,
 )
+
+# nearest_hospitals() reads limit x this many tag-filtered hospitals, then applies the
+# speciality / name check. Measured on the committed snapshots (every junction and every
+# hospital as the scene, limit 6): at most 12 nearest were needed (Delhi, Kolkata) - this
+# keeps 2x headroom (.work/stage5/fix2/backend/overfetch_check.py).
+HOSPITAL_OVERFETCH: Final = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +68,7 @@ def _station_cols() -> tuple[Any, ...]:
         StationRow.osm_id,
         StationRow.emergency,
         StationRow.healthcare,
+        StationRow.speciality,
     )
 
 
@@ -75,6 +82,7 @@ def _station(row: Any) -> Station:
         osm_ref=f"{row.osm_type}/{row.osm_id}",
         emergency=row.emergency,
         healthcare=row.healthcare,
+        speciality=row.speciality,
     )
 
 
@@ -228,9 +236,11 @@ class ReferenceRepository:
     async def nearest_hospitals(
         self, city_id: str, point: LatLng, limit: int = 6
     ) -> list[StationCandidate]:
-        """The ``limit`` nearest hospitals that can take an emergency patient (design §1.1):
-        active, named AMBULANCE stations (OSM amenity=hospital), excluding emergency=no and
-        the non-acute healthcare kinds. Index-assisted KNN like the dispatch query."""
+        """The ``limit`` nearest hospitals that can take an emergency patient (design §1.1,
+        :func:`divert.domain.hospitals.is_eligible`): active, named AMBULANCE stations (OSM
+        amenity=hospital), excluding emergency=no, the non-acute healthcare kinds and the
+        non-emergency specialities. Index-assisted KNN like the dispatch query: SQL applies
+        the tag filters, the nearest ``limit x HOSPITAL_OVERFETCH`` get the full check."""
         pt = geog_point(point)
         rows = await self.session.execute(
             sa.select(
@@ -250,9 +260,10 @@ class ReferenceRepository:
                 ),
             )
             .order_by(StationRow.geom.op("<->")(pt))
-            .limit(limit)
+            .limit(limit * HOSPITAL_OVERFETCH)
         )
-        return [StationCandidate(_station(r), 0, float(r.distance_m)) for r in rows]
+        found = [StationCandidate(_station(r), 0, float(r.distance_m)) for r in rows]
+        return [c for c in found if is_eligible(c.station)][:limit]
 
     # ----------------------------------------------------------------- signals
     async def list_signals(self, city_id: str) -> list[Signal]:
